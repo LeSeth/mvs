@@ -1,0 +1,64 @@
+# 1. Aller dans le dossier du projet
+cd /Users/vanda/Desktop/messagerie_app
+
+# 2. Initialiser Git (si pas déjà fait)
+git init
+
+# 3. Créer un fichier .gitignore pour Flutter
+cat > .gitignore << 'EOF'
+# Flutter
+.dart_tool/
+.packages
+build/
+*.iml
+.idea/
+.vscode/
+*.g.dart
+*.freezed.dart
+
+# Android
+android/app/build/
+android/.gradle/
+android/local.properties
+android/key.properties
+
+# iOS
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+
+# Web
+web/build/
+
+# macOS
+macos/Flutter/GeneratedPluginRegistrant.swift
+
+
+windows/flutter/
+
+
+linux/flutter/
+
+
+*.log
+*.pyc
+*.swp
+.DS_Store
+.env
+EOF
+
+
+git add .
+
+
+git commit -m "Initial commit: WhatsApp Burkina Faso"
+
+git branch -M main
+
+
+git remote add origin git@github.com:LeSeth/mvs.git
+
+
+git push -u origin main
+
