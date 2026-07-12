@@ -1,4 +1,4 @@
-import 'package:contacts_service/contacts_service.dart';
+import 'package:flutter_contacts/flutter_contacts.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'supabase_service.dart';
 
@@ -12,11 +12,13 @@ class ContactService {
   // Récupérer les contacts du téléphone
   static Future<List<Contact>> getPhoneContacts() async {
     try {
-      final contacts = await ContactsService.getContacts(
-        withThumbnails: false,
-        iOSLocalizedLabels: false,
-      );
-      return contacts.toList();
+      if (await FlutterContacts.requestPermission()) {
+        return await FlutterContacts.getContacts(
+          withProperties: true,
+          withPhoto: false,
+        );
+      }
+      return [];
     } catch (e) {
       print('Erreur récupération contacts: $e');
       return [];
@@ -28,8 +30,8 @@ class ContactService {
     List<String> phoneNumbers = [];
 
     for (var contact in contacts) {
-      for (var phone in contact.phones ?? []) {
-        String cleanedNumber = _cleanPhoneNumber(phone.value ?? '');
+      for (var phone in contact.phones) {
+        String cleanedNumber = _cleanPhoneNumber(phone.number);
         if (cleanedNumber.isNotEmpty) {
           phoneNumbers.add(cleanedNumber);
         }
