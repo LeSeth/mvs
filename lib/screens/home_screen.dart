@@ -4,6 +4,7 @@ import '../tabs/videos_tab.dart';
 import '../tabs/statuts_tab.dart';
 import '../tabs/parametres_tab.dart';
 import 'login_screen.dart';
+import 'new_conversation_screen.dart';
 import '../services/supabase_service.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -25,11 +26,17 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen>
     with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late TabController _tabController;
+  final GlobalKey<MessagesTabState> _messagesTabKey =
+      GlobalKey<MessagesTabState>();
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 4, vsync: this);
+    _tabController.addListener(() {
+      // Le FAB "nouvelle conversation" ne doit apparaître que sur l'onglet Messages
+      setState(() {});
+    });
     WidgetsBinding.instance.addObserver(this);
   }
 
@@ -68,7 +75,6 @@ class _HomeScreenState extends State<HomeScreen>
           ],
         ),
         actions: [
-          IconButton(icon: const Icon(Icons.search), onPressed: () {}),
           IconButton(
             icon: const Icon(Icons.more_vert),
             onPressed: () {
@@ -94,6 +100,7 @@ class _HomeScreenState extends State<HomeScreen>
         controller: _tabController,
         children: [
           MessagesTab(
+            key: _messagesTabKey,
             phoneNumber: widget.phoneNumber,
             pseudo: widget.pseudo,
             userId: widget.userId,
@@ -103,7 +110,25 @@ class _HomeScreenState extends State<HomeScreen>
           ParametresTab(phoneNumber: widget.phoneNumber, pseudo: widget.pseudo),
         ],
       ),
-      floatingActionButton: null,
+      floatingActionButton: _tabController.index == 0
+          ? FloatingActionButton(
+              backgroundColor: const Color(0xFF2AABEE),
+              child: const Icon(Icons.chat, color: Colors.white),
+              onPressed: () async {
+                await Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => NewConversationScreen(
+                      phoneNumber: widget.phoneNumber,
+                      pseudo: widget.pseudo,
+                    ),
+                  ),
+                );
+                // Rafraîchit la liste des conversations au retour
+                _messagesTabKey.currentState?.refreshContacts();
+              },
+            )
+          : null,
     );
   }
 

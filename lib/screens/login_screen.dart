@@ -31,15 +31,15 @@ class _LoginScreenState extends State<LoginScreen> {
         _isLoading = true;
       });
 
-      // IMPORTANT : pas d'espace après l'indicatif, pour que le format
-      // corresponde exactement à celui utilisé lors du hash des contacts
-      // (sinon la synchronisation ne retrouve jamais aucun contact).
-      String fullNumber = '+226${_phoneController.text.trim()}';
+      // On ne stocke QUE les 8 chiffres saisis, sans l'indicatif +226.
+      // Ce même format (8 chiffres nettoyés) est utilisé partout : hash,
+      // contacts, messages — donc tout reste cohérent.
+      String localNumber = _phoneController.text.trim();
       String pseudo = _pseudoController.text.trim();
 
       try {
         final user = await SupabaseService.createOrLoginUser(
-          phoneNumber: fullNumber,
+          phoneNumber: localNumber,
           pseudo: pseudo,
         );
 
@@ -50,7 +50,7 @@ class _LoginScreenState extends State<LoginScreen> {
             // Synchroniser les contacts seulement sur mobile
             // (la demande de permission est gérée à l'intérieur de syncContacts)
             if (!kIsWeb) {
-              ContactService.syncContacts(fullNumber);
+              ContactService.syncContacts(localNumber);
             }
 
             if (!mounted) return;
@@ -59,7 +59,7 @@ class _LoginScreenState extends State<LoginScreen> {
               context,
               MaterialPageRoute(
                 builder: (context) => HomeScreen(
-                  phoneNumber: fullNumber,
+                  phoneNumber: localNumber,
                   pseudo: pseudo,
                   userId: user['id'].toString(),
                 ),

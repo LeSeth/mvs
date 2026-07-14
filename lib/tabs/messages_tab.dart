@@ -1,7 +1,8 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../services/contact_service.dart';
 import '../services/message_service.dart';
-import '../services/supabase_service.dart'; // ← Ajouter cet import
+import '../services/supabase_service.dart';
 import '../screens/chat_screen.dart';
 
 class MessagesTab extends StatefulWidget {
@@ -17,18 +18,39 @@ class MessagesTab extends StatefulWidget {
   });
 
   @override
-  State<MessagesTab> createState() => _MessagesTabState();
+  State<MessagesTab> createState() => MessagesTabState();
 }
 
-class _MessagesTabState extends State<MessagesTab> {
+// État rendu public (au lieu de _MessagesTabState) pour pouvoir être
+// rafraîchi depuis l'extérieur via une GlobalKey (ex: après une nouvelle
+// conversation lancée depuis le bouton flottant dans HomeScreen).
+class MessagesTabState extends State<MessagesTab> {
   List<Map<String, dynamic>> _contacts = [];
   bool _isLoading = true;
+
+  final TextEditingController _searchController = TextEditingController();
+  Timer? _debounce;
+  List<Map<String, dynamic>> _searchResults = [];
+  bool _isSearching = false;
+  bool _searchLoading = false;
 
   @override
   void initState() {
     super.initState();
     _syncAndLoadContacts();
+    _searchController.addListener(_onSearchChanged);
   }
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  // Méthode publique : permet à HomeScreen de forcer un rafraîchissement
+  // (par exemple après avoir démarré une nouvelle conversation).
+  Future<void> refreshContacts() => _loadContacts();
 
   Future<void> _syncAndLoadContacts({bool showFeedback = false}) async {
     // Synchroniser les contacts du téléphone
@@ -93,8 +115,142 @@ class _MessagesTabState extends State<MessagesTab> {
     }
   }
 
+  void _onSearchChanged() {
+    final query = _searchController.text.trim();
+
+    setState(() {
+      _isSearching = query.isNotEmpty;
+    });
+
+    _debounce?.cancel();
+    if (query.isEmpty) {
+      setState(() => _searchResults = []);
+      return;
+    }
+
+    // Petit délai pour éviter une requête à chaque frappe
+    _debounce = Timer(const Duration(milliseconds: 400), () async {
+      setState(() => _searchLoading = true);
+      final results = await SupabaseService.searchUsersByPseudo(
+        query,
+        excludePhoneNumber: widget.phoneNumber,
+      );
+      if (mounted) {
+        setState(() {
+          _searchResults = results;
+          _searchLoading = false;
+        });
+      }
+    });
+  }
+
+  Future<void> _openChatWithUser(Map<String, dynamic> user) async {
+    // On s'assure que la personne fait partie de nos contacts pour qu'elle
+    // apparaisse ensuite dans la liste des conversations.
+    await ContactService.addContactIfNotExists(
+      userPhone: widget.phoneNumber,
+      contactPhoneHash: user['phone_hash'],
+      contactPseudo: user['pseudo'],
+    );
+
+    if (!mounted) return;
+
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => ChatScreen(
+          senderPhone: widget.phoneNumber,
+          receiverPhone: user['phone_number'],
+          receiverPseudo: user['pseudo'],
+        ),
+      ),
+    );
+
+    _searchController.clear();
+    if (mounted) {
+      setState(() => _isSearching = false);
+    }
+    _loadContacts();
+  }
+
   @override
   Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+          child: TextField(
+            controller: _searchController,
+            style: const TextStyle(color: Colors.white),
+            decoration: InputDecoration(
+              hintText: 'Rechercher un pseudo...',
+              hintStyle: TextStyle(color: Colors.grey[500]),
+              prefixIcon: Icon(Icons.search, color: Colors.grey[500]),
+              suffixIcon: _isSearching
+                  ? IconButton(
+                      icon: Icon(Icons.close, color: Colors.grey[500]),
+                      onPressed: () => _searchController.clear(),
+                    )
+                  : null,
+              filled: true,
+              fillColor: const Color(0xFF1F2C34),
+              contentPadding: const EdgeInsets.symmetric(vertical: 0),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(24),
+                borderSide: BorderSide.none,
+              ),
+            ),
+          ),
+        ),
+        Expanded(child: _isSearching ? _buildSearchResults() : _buildContactsList()),
+      ],
+    );
+  }
+
+  Widget _buildSearchResults() {
+    if (_searchLoading) {
+      return const Center(
+        child: CircularProgressIndicator(color: Color(0xFF2AABEE)),
+      );
+    }
+
+    if (_searchResults.isEmpty) {
+      return Center(
+        child: Text(
+          'Aucun utilisateur trouvé',
+          style: TextStyle(color: Colors.grey[500]),
+        ),
+      );
+    }
+
+    return ListView.builder(
+      itemCount: _searchResults.length,
+      itemBuilder: (context, index) {
+        final user = _searchResults[index];
+        final pseudo = (user['pseudo'] as String?) ?? '';
+        final isOnline = user['is_online'] == true;
+
+        return ListTile(
+          leading: CircleAvatar(
+            radius: 24,
+            backgroundColor: const Color(0xFF2AABEE),
+            child: Text(
+              pseudo.isNotEmpty ? pseudo[0].toUpperCase() : '?',
+              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+            ),
+          ),
+          title: Text(pseudo, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          subtitle: Text(
+            isOnline ? 'En ligne' : 'Hors ligne',
+            style: TextStyle(color: isOnline ? Colors.green : Colors.grey[500], fontSize: 12),
+          ),
+          onTap: () => _openChatWithUser(user),
+        );
+      },
+    );
+  }
+
+  Widget _buildContactsList() {
     if (_isLoading) {
       return const Center(
         child: CircularProgressIndicator(color: Color(0xFF2AABEE)),

@@ -88,10 +88,11 @@ class ParametresTab extends StatelessWidget {
     );
   }
 
-  // Formate "+22670123456" en "+226 70 12 34 56" pour l'affichage uniquement
+  // "70123456" -> "+226 70 12 34 56" (affichage uniquement,
+  // le numéro stocké en base reste les 8 chiffres bruts)
   String _formatPhoneForDisplay(String phone) {
-    if (!phone.startsWith('+226') || phone.length != 12) return phone;
-    final digits = phone.substring(4); // les 8 chiffres
+    final digits = phone.replaceAll(RegExp(r'[^\d]'), '');
+    if (digits.length != 8) return phone;
     final buffer = StringBuffer('+226 ');
     for (int i = 0; i < digits.length; i += 2) {
       buffer.write(digits.substring(i, i + 2));

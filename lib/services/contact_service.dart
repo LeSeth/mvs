@@ -55,7 +55,10 @@ class ContactService {
     return phoneNumbers.toSet().toList();
   }
 
-  // Nettoyer un numéro de téléphone
+  // Nettoyer un numéro de téléphone -> renvoie 8 chiffres bruts (sans +226),
+  // car c'est ce format qui est maintenant stocké et hashé en base.
+  // Renvoie une chaîne vide si le numéro ne correspond pas à un numéro
+  // burkinabè valide à 8 chiffres.
   static String _cleanPhoneNumber(String phone) {
     String cleaned = phone.replaceAll(RegExp(r'[^\d]'), '');
 
@@ -64,10 +67,10 @@ class ContactService {
     }
 
     if (cleaned.length == 8) {
-      return '+226$cleaned';
+      return cleaned;
     }
 
-    return cleaned;
+    return '';
   }
 
   // Synchroniser les contacts avec Supabase
@@ -106,27 +109,48 @@ class ContactService {
           continue; // ne pas s'ajouter soi-même
         }
 
-        final existingContact = await SupabaseService.client
-            .from('contacts')
-            .select()
-            .eq('user_phone', userPhone)
-            .eq('contact_phone_hash', user['phone_hash'])
-            .maybeSingle();
-
-        if (existingContact == null) {
-          await SupabaseService.client.from('contacts').insert({
-            'user_phone': userPhone,
-            'contact_phone_hash': user['phone_hash'],
-            'contact_pseudo': user['pseudo'],
-          });
-          newContactsCount++;
-        }
+        final added = await addContactIfNotExists(
+          userPhone: userPhone,
+          contactPhoneHash: user['phone_hash'],
+          contactPseudo: user['pseudo'],
+        );
+        if (added) newContactsCount++;
       }
 
       return newContactsCount;
     } catch (e) {
       print('Erreur synchronisation contacts: $e');
       return -1;
+    }
+  }
+
+  // Ajoute un contact s'il n'existe pas déjà pour cet utilisateur.
+  // Retourne true si un nouveau contact a été inséré.
+  static Future<bool> addContactIfNotExists({
+    required String userPhone,
+    required String contactPhoneHash,
+    required String contactPseudo,
+  }) async {
+    try {
+      final existingContact = await SupabaseService.client
+          .from('contacts')
+          .select()
+          .eq('user_phone', userPhone)
+          .eq('contact_phone_hash', contactPhoneHash)
+          .maybeSingle();
+
+      if (existingContact == null) {
+        await SupabaseService.client.from('contacts').insert({
+          'user_phone': userPhone,
+          'contact_phone_hash': contactPhoneHash,
+          'contact_pseudo': contactPseudo,
+        });
+        return true;
+      }
+      return false;
+    } catch (e) {
+      print('Erreur ajout contact: $e');
+      return false;
     }
   }
 

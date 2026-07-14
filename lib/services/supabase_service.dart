@@ -103,6 +103,37 @@ class SupabaseService {
     }
   }
 
+  // Rechercher des utilisateurs par pseudo (recherche globale, insensible à la casse)
+  static Future<List<Map<String, dynamic>>> searchUsersByPseudo(
+    String query, {
+    String? excludePhoneNumber,
+  }) async {
+    try {
+      if (query.trim().isEmpty) return [];
+
+      final users = await _client
+          .from('users')
+          .select('id, pseudo, phone_number, phone_hash, is_online')
+          .ilike('pseudo', '%${query.trim()}%')
+          .limit(20);
+
+      List<Map<String, dynamic>> results = List<Map<String, dynamic>>.from(
+        users,
+      );
+
+      if (excludePhoneNumber != null) {
+        results = results
+            .where((u) => u['phone_number'] != excludePhoneNumber)
+            .toList();
+      }
+
+      return results;
+    } catch (e) {
+      print('Erreur recherche pseudo: $e');
+      return [];
+    }
+  }
+
   static Future<void> setOnlineStatus(String phoneNumber, bool isOnline) async {
     try {
       await _client
