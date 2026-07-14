@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'home_screen.dart';
 import '../services/supabase_service.dart';
 import '../services/contact_service.dart';
+import '../services/auth_storage.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -47,6 +48,14 @@ class _LoginScreenState extends State<LoginScreen> {
           setState(() => _isLoading = false);
 
           if (user != null) {
+            // Sauvegarder la session localement pour rester connecté même
+            // après fermeture de l'app ou redémarrage du téléphone.
+            await AuthStorage.saveSession(
+              phoneNumber: localNumber,
+              pseudo: pseudo,
+              userId: user['id'].toString(),
+            );
+
             // Synchroniser les contacts seulement sur mobile
             // (la demande de permission est gérée à l'intérieur de syncContacts)
             if (!kIsWeb) {

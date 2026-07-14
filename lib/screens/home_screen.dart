@@ -6,6 +6,7 @@ import '../tabs/parametres_tab.dart';
 import 'login_screen.dart';
 import 'new_conversation_screen.dart';
 import '../services/supabase_service.dart';
+import '../services/auth_storage.dart';
 
 class HomeScreen extends StatefulWidget {
   final String phoneNumber;
@@ -184,6 +185,7 @@ class _HomeScreenState extends State<HomeScreen>
                 ),
                 onTap: () async {
                   await SupabaseService.logout(widget.phoneNumber);
+                  await AuthStorage.clearSession();
                   if (context.mounted) {
                     Navigator.pop(context);
                     Navigator.pushAndRemoveUntil(

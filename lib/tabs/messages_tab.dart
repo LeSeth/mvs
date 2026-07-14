@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/contact_service.dart';
 import '../services/message_service.dart';
 import '../services/supabase_service.dart';
@@ -33,18 +34,31 @@ class MessagesTabState extends State<MessagesTab> {
   List<Map<String, dynamic>> _searchResults = [];
   bool _isSearching = false;
   bool _searchLoading = false;
+  RealtimeChannel? _messagesChannel;
 
   @override
   void initState() {
     super.initState();
     _syncAndLoadContacts();
     _searchController.addListener(_onSearchChanged);
+    _messagesChannel = MessageService.subscribeToIncomingMessages(
+      myPhone: widget.phoneNumber,
+      channelName: 'messages_list_${widget.phoneNumber}',
+      onInsert: (_) {
+        // Un nouveau message est arrivé : on rafraîchit la liste des
+        // conversations (aperçu du dernier message + badge non lus).
+        if (mounted) _loadContacts();
+      },
+    );
   }
 
   @override
   void dispose() {
     _debounce?.cancel();
     _searchController.dispose();
+    if (_messagesChannel != null) {
+      MessageService.unsubscribe(_messagesChannel!);
+    }
     super.dispose();
   }
 

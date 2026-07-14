@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/message_service.dart';
 
 class ChatScreen extends StatefulWidget {
@@ -19,19 +20,57 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen> {
   final _messageController = TextEditingController();
+  final _scrollController = ScrollController();
   List<Map<String, dynamic>> _messages = [];
   bool _isLoading = true;
+  RealtimeChannel? _messagesChannel;
 
   @override
   void initState() {
     super.initState();
     _loadMessages();
     _markMessagesAsRead();
+    _subscribeToNewMessages();
+  }
+
+  void _subscribeToNewMessages() {
+    _messagesChannel = MessageService.subscribeToIncomingMessages(
+      myPhone: widget.senderPhone,
+      channelName: 'chat_${widget.senderPhone}_${widget.receiverPhone}',
+      onInsert: (message) {
+        // On ne traite que les messages venant de la personne avec qui
+        // on discute actuellement dans cet écran.
+        if (message['sender_phone'] != widget.receiverPhone) return;
+        if (!mounted) return;
+
+        setState(() {
+          _messages.add(message);
+        });
+        _markMessagesAsRead();
+        _scrollToBottom();
+      },
+    );
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
+    });
   }
 
   @override
   void dispose() {
     _messageController.dispose();
+    _scrollController.dispose();
+    if (_messagesChannel != null) {
+      MessageService.unsubscribe(_messagesChannel!);
+    }
     super.dispose();
   }
 
@@ -45,6 +84,7 @@ class _ChatScreenState extends State<ChatScreen> {
         _messages = messages;
         _isLoading = false;
       });
+      _scrollToBottom();
     }
   }
 
@@ -67,7 +107,7 @@ class _ChatScreenState extends State<ChatScreen> {
       content: content,
     );
 
-    _loadMessages();
+    await _loadMessages();
   }
 
   @override
@@ -100,6 +140,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     child: CircularProgressIndicator(color: Color(0xFF2AABEE)),
                   )
                 : ListView.builder(
+                    controller: _scrollController,
                     reverse: false,
                     padding: const EdgeInsets.all(16),
                     itemCount: _messages.length,

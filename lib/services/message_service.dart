@@ -1,3 +1,4 @@
+import 'package:supabase_flutter/supabase_flutter.dart';
 import 'supabase_service.dart';
 
 class MessageService {
@@ -95,5 +96,39 @@ class MessageService {
     } catch (e) {
       return 0;
     }
+  }
+
+  // Écoute en temps réel les nouveaux messages reçus par [myPhone].
+  // [onInsert] est appelé avec la ligne du nouveau message dès qu'elle
+  // arrive, sans avoir besoin de recharger manuellement la conversation.
+  // Un identifiant unique (channelName) évite les conflits si plusieurs
+  // écrans s'abonnent en même temps.
+  static RealtimeChannel subscribeToIncomingMessages({
+    required String myPhone,
+    required void Function(Map<String, dynamic> message) onInsert,
+    required String channelName,
+  }) {
+    final channel = SupabaseService.client
+        .channel(channelName)
+        .onPostgresChanges(
+          event: PostgresChangeEvent.insert,
+          schema: 'public',
+          table: 'messages',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'receiver_phone',
+            value: myPhone,
+          ),
+          callback: (payload) {
+            onInsert(payload.newRecord);
+          },
+        )
+        .subscribe();
+
+    return channel;
+  }
+
+  static void unsubscribe(RealtimeChannel channel) {
+    SupabaseService.client.removeChannel(channel);
   }
 }
