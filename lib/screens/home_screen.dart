@@ -58,7 +58,7 @@ class _HomeScreenState extends State<HomeScreen>
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              'WhatsApp BF',
+              'V BF',
               style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
             ),
             Text(
@@ -188,7 +188,7 @@ class _HomeScreenState extends State<HomeScreen>
           children: [
             Icon(Icons.message_rounded, color: Color(0xFF2AABEE), size: 30),
             SizedBox(width: 10),
-            Text('WhatsApp BF', style: TextStyle(color: Colors.white)),
+            Text('V BF', style: TextStyle(color: Colors.white)),
           ],
         ),
         content: Column(
@@ -201,7 +201,7 @@ class _HomeScreenState extends State<HomeScreen>
             ),
             const SizedBox(height: 15),
             _buildInfoRow('Version', '1.0.0'),
-            _buildInfoRow('Développeur', 'Équipe WhatsApp BF'),
+            _buildInfoRow('Développeur', 'Équipe V BF'),
             _buildInfoRow('Pays', 'Burkina Faso'),
             _buildInfoRow('Indicatif', '+226'),
             const SizedBox(height: 15),

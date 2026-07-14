@@ -75,7 +75,7 @@ class SupabaseService {
     try {
       final users = await _client
           .from('users')
-          .select('id, pseudo, phone_hash, is_online, last_login')
+          .select('id, pseudo, phone_number, phone_hash, is_online, last_login')
           .order('is_online', ascending: false);
       return List<Map<String, dynamic>>.from(users);
     } catch (e) {
@@ -93,7 +93,7 @@ class SupabaseService {
 
       final users = await _client
           .from('users')
-          .select('id, pseudo, phone_hash, is_online, last_login')
+          .select('id, pseudo, phone_number, phone_hash, is_online, last_login')
           .inFilter('phone_hash', hashes);
 
       return List<Map<String, dynamic>>.from(users);

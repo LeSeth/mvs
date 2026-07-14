@@ -72,7 +72,7 @@ class ParametresTab extends StatelessWidget {
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    phoneNumber,
+                    _formatPhoneForDisplay(phoneNumber),
                     style: const TextStyle(color: Colors.grey, fontSize: 14),
                   ),
                 ],
@@ -86,6 +86,18 @@ class ParametresTab extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  // Formate "+22670123456" en "+226 70 12 34 56" pour l'affichage uniquement
+  String _formatPhoneForDisplay(String phone) {
+    if (!phone.startsWith('+226') || phone.length != 12) return phone;
+    final digits = phone.substring(4); // les 8 chiffres
+    final buffer = StringBuffer('+226 ');
+    for (int i = 0; i < digits.length; i += 2) {
+      buffer.write(digits.substring(i, i + 2));
+      if (i + 2 < digits.length) buffer.write(' ');
+    }
+    return buffer.toString();
   }
 
   Widget _buildSettingsItem(IconData icon, String titre, String sousTitre) {

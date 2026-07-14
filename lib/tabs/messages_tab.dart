@@ -30,11 +30,28 @@ class _MessagesTabState extends State<MessagesTab> {
     _syncAndLoadContacts();
   }
 
-  Future<void> _syncAndLoadContacts() async {
+  Future<void> _syncAndLoadContacts({bool showFeedback = false}) async {
     // Synchroniser les contacts du téléphone
-    await ContactService.syncContacts(widget.phoneNumber);
+    final result = await ContactService.syncContacts(widget.phoneNumber);
     // Charger les contacts
     await _loadContacts();
+
+    if (showFeedback && mounted) {
+      String message;
+      if (result < 0) {
+        message =
+            'Synchronisation impossible : vérifiez la permission "Contacts" '
+            'dans les paramètres du téléphone et votre connexion Internet.';
+      } else if (result == 0) {
+        message = 'Aucun nouveau contact trouvé sur l\'application.';
+      } else {
+        message = '$result nouveau${result > 1 ? "x" : ""} contact'
+            '${result > 1 ? "s" : ""} ajouté${result > 1 ? "s" : ""} !';
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(message), duration: const Duration(seconds: 3)),
+      );
+    }
   }
 
   Future<void> _loadContacts() async {
@@ -47,7 +64,7 @@ class _MessagesTabState extends State<MessagesTab> {
         contact['contact_phone_hash'],
       ]);
       String contactPhone = users.isNotEmpty
-          ? users[0]['phone_hash']
+          ? users[0]['phone_number']
           : contact['contact_phone_hash'];
 
       final lastMessage = await MessageService.getLastMessage(
@@ -101,12 +118,12 @@ class _MessagesTabState extends State<MessagesTab> {
             ),
             const SizedBox(height: 8),
             Text(
-              'Vos contacts WhatsApp apparaîtront ici',
+              'Vos contacts V apparaîtront ici',
               style: TextStyle(color: Colors.grey[600]),
             ),
             const SizedBox(height: 20),
             ElevatedButton.icon(
-              onPressed: _syncAndLoadContacts,
+              onPressed: () => _syncAndLoadContacts(showFeedback: true),
               icon: const Icon(Icons.sync),
               label: const Text('Synchroniser les contacts'),
               style: ElevatedButton.styleFrom(
@@ -119,7 +136,7 @@ class _MessagesTabState extends State<MessagesTab> {
     }
 
     return RefreshIndicator(
-      onRefresh: _syncAndLoadContacts,
+      onRefresh: () => _syncAndLoadContacts(showFeedback: true),
       child: ListView.builder(
         itemCount: _contacts.length,
         itemBuilder: (context, index) {
@@ -143,7 +160,9 @@ class _MessagesTabState extends State<MessagesTab> {
           radius: 28,
           backgroundColor: const Color(0xFF2AABEE),
           child: Text(
-            contact['contact_pseudo'][0].toUpperCase(),
+            (contact['contact_pseudo'] as String?)?.isNotEmpty == true
+                ? contact['contact_pseudo'][0].toUpperCase()
+                : '?',
             style: const TextStyle(
               color: Colors.white,
               fontWeight: FontWeight.bold,

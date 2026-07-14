@@ -1,16 +1,30 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_contacts/flutter_contacts.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'supabase_service.dart';
 
 class ContactService {
+  // Vérifier si on est sur mobile
+  static bool get isMobile => !kIsWeb;
+
   // Demander la permission d'accéder aux contacts
   static Future<bool> requestContactPermission() async {
+    if (!isMobile) {
+      // Sur Web, on ne peut pas accéder aux contacts
+      return false;
+    }
+
     final status = await Permission.contacts.request();
     return status.isGranted;
   }
 
   // Récupérer les contacts du téléphone
   static Future<List<Contact>> getPhoneContacts() async {
+    if (!isMobile) {
+      print('Contacts non disponibles sur Web');
+      return [];
+    }
+
     try {
       if (await FlutterContacts.requestPermission()) {
         return await FlutterContacts.getContacts(
@@ -38,20 +52,17 @@ class ContactService {
       }
     }
 
-    return phoneNumbers.toSet().toList(); // Éviter les doublons
+    return phoneNumbers.toSet().toList();
   }
 
   // Nettoyer un numéro de téléphone
   static String _cleanPhoneNumber(String phone) {
-    // Enlever tous les caractères non numériques
     String cleaned = phone.replaceAll(RegExp(r'[^\d]'), '');
 
-    // Si le numéro commence par 226, enlever le préfixe
     if (cleaned.startsWith('226') && cleaned.length > 8) {
       cleaned = cleaned.substring(3);
     }
 
-    // Ajouter le préfixe +226 si nécessaire
     if (cleaned.length == 8) {
       return '+226$cleaned';
     }
@@ -60,25 +71,41 @@ class ContactService {
   }
 
   // Synchroniser les contacts avec Supabase
-  static Future<void> syncContacts(String userPhone) async {
+  // Retourne le nombre de nouveaux contacts ajoutés, ou -1 en cas d'erreur
+  // (permission refusée, pas de connexion, etc.) afin que l'UI puisse
+  // donner un retour clair à l'utilisateur plutôt que d'échouer en silence.
+  static Future<int> syncContacts(String userPhone) async {
+    if (!isMobile) {
+      print('Synchronisation contacts non disponible sur Web');
+      return -1;
+    }
+
     try {
-      // 1. Récupérer les contacts du téléphone
+      final hasPermission = await requestContactPermission();
+      if (!hasPermission) {
+        print('Permission contacts refusée');
+        return -1;
+      }
+
       final phoneContacts = await getPhoneContacts();
       final phoneNumbers = extractPhoneNumbers(phoneContacts);
 
-      // 2. Hasher tous les numéros des contacts
       List<String> hashedNumbers = phoneNumbers
           .map((phone) => SupabaseService.hashPhoneNumber(phone))
           .toList();
 
-      // 3. Chercher ces hashs dans Supabase
       final registeredUsers = await SupabaseService.findUsersByPhoneHashes(
         hashedNumbers,
       );
 
-      // 4. Créer les liens de contact
+      int newContactsCount = 0;
+      final myHash = SupabaseService.hashPhoneNumber(userPhone);
+
       for (var user in registeredUsers) {
-        // Vérifier si le contact existe déjà
+        if (user['phone_hash'] == myHash) {
+          continue; // ne pas s'ajouter soi-même
+        }
+
         final existingContact = await SupabaseService.client
             .from('contacts')
             .select()
@@ -86,17 +113,20 @@ class ContactService {
             .eq('contact_phone_hash', user['phone_hash'])
             .maybeSingle();
 
-        if (existingContact == null &&
-            user['phone_hash'] != SupabaseService.hashPhoneNumber(userPhone)) {
+        if (existingContact == null) {
           await SupabaseService.client.from('contacts').insert({
             'user_phone': userPhone,
             'contact_phone_hash': user['phone_hash'],
             'contact_pseudo': user['pseudo'],
           });
+          newContactsCount++;
         }
       }
+
+      return newContactsCount;
     } catch (e) {
       print('Erreur synchronisation contacts: $e');
+      return -1;
     }
   }
 

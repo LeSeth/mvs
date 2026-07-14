@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/services.dart';
-import 'package:permission_handler/permission_handler.dart';
 import 'home_screen.dart';
 import '../services/supabase_service.dart';
 import '../services/contact_service.dart';
@@ -31,61 +31,85 @@ class _LoginScreenState extends State<LoginScreen> {
         _isLoading = true;
       });
 
-      // Demander la permission des contacts
-      bool contactPermission = await ContactService.requestContactPermission();
-
-      if (!contactPermission) {
-        if (mounted) {
-          setState(() => _isLoading = false);
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                'L\'accès aux contacts est nécessaire pour trouver vos amis',
-              ),
-              backgroundColor: Colors.orange,
-            ),
-          );
-        }
-      }
-
-      String fullNumber = '+226 ${_phoneController.text.trim()}';
+      // IMPORTANT : pas d'espace après l'indicatif, pour que le format
+      // corresponde exactement à celui utilisé lors du hash des contacts
+      // (sinon la synchronisation ne retrouve jamais aucun contact).
+      String fullNumber = '+226${_phoneController.text.trim()}';
       String pseudo = _pseudoController.text.trim();
 
-      final user = await SupabaseService.createOrLoginUser(
-        phoneNumber: fullNumber,
-        pseudo: pseudo,
-      );
+      try {
+        final user = await SupabaseService.createOrLoginUser(
+          phoneNumber: fullNumber,
+          pseudo: pseudo,
+        );
 
-      if (mounted) {
-        setState(() => _isLoading = false);
+        if (mounted) {
+          setState(() => _isLoading = false);
 
-        if (user != null) {
-          // Synchroniser les contacts en arrière-plan
-          if (contactPermission) {
-            ContactService.syncContacts(fullNumber);
-          }
+          if (user != null) {
+            // Synchroniser les contacts seulement sur mobile
+            // (la demande de permission est gérée à l'intérieur de syncContacts)
+            if (!kIsWeb) {
+              ContactService.syncContacts(fullNumber);
+            }
 
-          Navigator.pushAndRemoveUntil(
-            context,
-            MaterialPageRoute(
-              builder: (context) => HomeScreen(
-                phoneNumber: fullNumber,
-                pseudo: pseudo,
-                userId: user['id'].toString(),
+            if (!mounted) return;
+
+            Navigator.pushAndRemoveUntil(
+              context,
+              MaterialPageRoute(
+                builder: (context) => HomeScreen(
+                  phoneNumber: fullNumber,
+                  pseudo: pseudo,
+                  userId: user['id'].toString(),
+                ),
               ),
-            ),
-            (route) => false,
-          );
-        } else {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Erreur de connexion. Veuillez réessayer.'),
-              backgroundColor: Colors.red,
-            ),
+              (route) => false,
+            );
+          } else {
+            _showErrorDialog(
+              'Erreur de connexion',
+              'Impossible de se connecter au serveur. Vérifiez votre connexion Internet et réessayez.',
+            );
+          }
+        }
+      } catch (e) {
+        if (mounted) {
+          setState(() => _isLoading = false);
+          _showErrorDialog(
+            'Erreur de connexion',
+            'Vérifiez que vous avez une connexion Internet active.\n\nSi le problème persiste, réessayez plus tard.',
           );
         }
       }
     }
+  }
+
+  void _showErrorDialog(String title, String message) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF1F2C34),
+        title: Text(title, style: const TextStyle(color: Colors.white)),
+        content: Text(message, style: const TextStyle(color: Colors.grey)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('OK', style: TextStyle(color: Color(0xFF2AABEE))),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _submitForm();
+            },
+            child: const Text(
+              'Réessayer',
+              style: TextStyle(color: Color(0xFF2AABEE)),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -101,11 +125,11 @@ class _LoginScreenState extends State<LoginScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  const SizedBox(height: 60),
+                  const SizedBox(height: kIsWeb ? 40 : 60),
 
                   Container(
-                    width: 120,
-                    height: 120,
+                    width: kIsWeb ? 100 : 120,
+                    height: kIsWeb ? 100 : 120,
                     decoration: BoxDecoration(
                       color: const Color(0xFF2AABEE),
                       borderRadius: BorderRadius.circular(30),
@@ -127,7 +151,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   const SizedBox(height: 40),
 
                   const Text(
-                    'WhatsApp Burkina',
+                    'V Burkina',
                     style: TextStyle(
                       fontSize: 28,
                       fontWeight: FontWeight.bold,
@@ -142,7 +166,9 @@ class _LoginScreenState extends State<LoginScreen> {
                   const SizedBox(height: 12),
 
                   Text(
-                    'Créez votre compte pour commencer',
+                    kIsWeb
+                        ? 'Connectez-vous à votre compte'
+                        : 'Créez votre compte\npour commencer',
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       fontSize: 16,
@@ -151,7 +177,41 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                   ),
 
-                  const SizedBox(height: 40),
+                  // Message spécifique Web
+                  if (kIsWeb) ...[
+                    const SizedBox(height: 12),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.orange.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: Colors.orange.withOpacity(0.3),
+                        ),
+                      ),
+                      child: const Row(
+                        children: [
+                          Icon(
+                            Icons.info_outline,
+                            color: Colors.orange,
+                            size: 20,
+                          ),
+                          SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              'Version Web : La synchronisation des contacts n\'est pas disponible',
+                              style: TextStyle(
+                                color: Colors.orange,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+
+                  const SizedBox(height: 30),
 
                   TextFormField(
                     controller: _pseudoController,
@@ -268,7 +328,7 @@ class _LoginScreenState extends State<LoginScreen> {
                               ),
                             )
                           : const Text(
-                              'Créer mon compte',
+                              'Se connecter',
                               style: TextStyle(
                                 fontSize: 18,
                                 fontWeight: FontWeight.bold,
