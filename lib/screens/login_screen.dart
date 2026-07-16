@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/services.dart';
@@ -19,11 +21,87 @@ class _LoginScreenState extends State<LoginScreen> {
   final _formKey = GlobalKey<FormState>();
   bool _isLoading = false;
 
+  // --- Suggestions de pseudo pendant la saisie ---
+  Timer? _pseudoDebounce;
+  bool _checkingPseudo = false;
+  bool? _pseudoAvailable; // null = pas encore vérifié
+  List<String> _pseudoSuggestions = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _pseudoController.addListener(_onPseudoChanged);
+  }
+
   @override
   void dispose() {
+    _pseudoDebounce?.cancel();
+    _pseudoController.removeListener(_onPseudoChanged);
     _phoneController.dispose();
     _pseudoController.dispose();
     super.dispose();
+  }
+
+  void _onPseudoChanged() {
+    final query = _pseudoController.text.trim();
+
+    _pseudoDebounce?.cancel();
+
+    if (query.length < 3) {
+      setState(() {
+        _pseudoAvailable = null;
+        _pseudoSuggestions = [];
+        _checkingPseudo = false;
+      });
+      return;
+    }
+
+    _pseudoDebounce = Timer(const Duration(milliseconds: 500), () async {
+      setState(() => _checkingPseudo = true);
+
+      final results = await SupabaseService.searchUsersByPseudo(query);
+      final existingLower = results
+          .map((u) => (u['pseudo'] as String? ?? '').toLowerCase())
+          .toSet();
+      final isTaken = existingLower.contains(query.toLowerCase());
+
+      final suggestions = isTaken
+          ? _generateSuggestions(query, existingLower)
+          : <String>[];
+
+      if (mounted) {
+        setState(() {
+          _pseudoAvailable = !isTaken;
+          _pseudoSuggestions = suggestions;
+          _checkingPseudo = false;
+        });
+      }
+    });
+  }
+
+  // Génère quelques variantes disponibles autour du pseudo souhaité
+  List<String> _generateSuggestions(String base, Set<String> taken) {
+    final random = Random();
+    final candidates = <String>{
+      '${base}_bf',
+      '$base${DateTime.now().year % 100}',
+      '${base}_${random.nextInt(90) + 10}',
+      '${base}officiel',
+      '$base${random.nextInt(900) + 100}',
+      '${base}_pro',
+    };
+
+    return candidates
+        .where((c) => !taken.contains(c.toLowerCase()))
+        .take(3)
+        .toList();
+  }
+
+  void _applySuggestion(String suggestion) {
+    _pseudoController.text = suggestion;
+    _pseudoController.selection = TextSelection.fromPosition(
+      TextPosition(offset: suggestion.length),
+    );
   }
 
   void _submitForm() async {
@@ -82,6 +160,11 @@ class _LoginScreenState extends State<LoginScreen> {
             );
           }
         }
+      } on PhoneNumberTakenException catch (e) {
+        if (mounted) {
+          setState(() => _isLoading = false);
+          _showErrorDialog('Numéro déjà utilisé', e.message);
+        }
       } catch (e) {
         if (mounted) {
           setState(() => _isLoading = false);
@@ -119,6 +202,83 @@ class _LoginScreenState extends State<LoginScreen> {
         ],
       ),
     );
+  }
+
+  Widget _buildPseudoFeedback() {
+    if (_checkingPseudo) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 8, left: 4),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 12,
+              height: 12,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: Colors.grey[500],
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              'Vérification du pseudo...',
+              style: TextStyle(color: Colors.grey[500], fontSize: 12),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (_pseudoAvailable == false) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 8, left: 4),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Ce pseudo est déjà pris',
+              style: TextStyle(color: Colors.redAccent, fontSize: 12),
+            ),
+            if (_pseudoSuggestions.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: _pseudoSuggestions.map((s) {
+                  return ActionChip(
+                    label: Text(s),
+                    backgroundColor: const Color(0xFF1F2C34),
+                    labelStyle: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 13,
+                    ),
+                    side: const BorderSide(color: Color(0xFF2AABEE)),
+                    onPressed: () => _applySuggestion(s),
+                  );
+                }).toList(),
+              ),
+            ],
+          ],
+        ),
+      );
+    }
+
+    if (_pseudoAvailable == true) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 8, left: 4),
+        child: Row(
+          children: const [
+            Icon(Icons.check_circle, color: Colors.green, size: 14),
+            SizedBox(width: 6),
+            Text(
+              'Pseudo disponible',
+              style: TextStyle(color: Colors.green, fontSize: 12),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return const SizedBox.shrink();
   }
 
   @override
@@ -261,6 +421,10 @@ class _LoginScreenState extends State<LoginScreen> {
                       }
                       return null;
                     },
+                  ),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: _buildPseudoFeedback(),
                   ),
 
                   const SizedBox(height: 20),

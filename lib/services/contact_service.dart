@@ -154,6 +154,32 @@ class ContactService {
     }
   }
 
+  // Garantit que [phoneA] et [phoneB] sont mutuellement dans les contacts
+  // l'un de l'autre. Appelé à chaque envoi de message : c'est ce qui permet
+  // à la conversation d'apparaître automatiquement dans la liste des
+  // messages des DEUX personnes, même si elles ne se sont jamais
+  // synchronisées via leurs contacts téléphone ou la recherche.
+  static Future<void> ensureMutualContact({
+    required String phoneA,
+    required String pseudoA,
+    required String phoneB,
+    required String pseudoB,
+  }) async {
+    final hashA = SupabaseService.hashPhoneNumber(phoneA);
+    final hashB = SupabaseService.hashPhoneNumber(phoneB);
+
+    await addContactIfNotExists(
+      userPhone: phoneA,
+      contactPhoneHash: hashB,
+      contactPseudo: pseudoB,
+    );
+    await addContactIfNotExists(
+      userPhone: phoneB,
+      contactPhoneHash: hashA,
+      contactPseudo: pseudoA,
+    );
+  }
+
   // Récupérer les contacts synchronisés
   static Future<List<Map<String, dynamic>>> getContacts(
     String userPhone,

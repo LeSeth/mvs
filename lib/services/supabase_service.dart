@@ -2,6 +2,17 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:crypto/crypto.dart';
 import 'dart:convert';
 
+// Levée quand quelqu'un essaie de s'inscrire avec un numéro déjà associé
+// à un compte existant sous un AUTRE pseudo (donc pas juste une reconnexion
+// de la même personne).
+class PhoneNumberTakenException implements Exception {
+  final String message;
+  PhoneNumberTakenException([
+    this.message =
+        'Ce numéro de téléphone est déjà utilisé par un compte existant.',
+  ]);
+}
+
 class SupabaseService {
   static const String _url = 'https://azbsjltcltepkdteoeqr.supabase.co';
   static const String _anonKey =
@@ -38,6 +49,15 @@ class SupabaseService {
           .maybeSingle();
 
       if (existingUser != null) {
+        // Le numéro est déjà associé à un compte.
+        // Si le pseudo ne correspond pas, quelqu'un essaie d'utiliser un
+        // numéro qui ne lui appartient pas -> on bloque (numéro unique).
+        if (existingUser['pseudo'] != pseudo) {
+          throw PhoneNumberTakenException();
+        }
+
+        // Même pseudo : c'est la même personne qui se reconnecte
+        // (comportement inchangé par rapport à avant).
         await _client
             .from('users')
             .update({
@@ -64,6 +84,8 @@ class SupabaseService {
 
         return newUser;
       }
+    } on PhoneNumberTakenException {
+      rethrow;
     } catch (e) {
       print('Erreur Supabase: $e');
       return null;
@@ -103,7 +125,9 @@ class SupabaseService {
     }
   }
 
-  // Rechercher des utilisateurs par pseudo (recherche globale, insensible à la casse)
+  // Rechercher des utilisateurs par pseudo (recherche globale, insensible à
+  // la casse). Utilisé à la fois pour la recherche de conversation et pour
+  // vérifier la disponibilité d'un pseudo à l'inscription.
   static Future<List<Map<String, dynamic>>> searchUsersByPseudo(
     String query, {
     String? excludePhoneNumber,

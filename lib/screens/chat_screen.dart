@@ -1,15 +1,19 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/message_service.dart';
+import '../services/contact_service.dart';
 
 class ChatScreen extends StatefulWidget {
   final String senderPhone;
+  final String senderPseudo;
   final String receiverPhone;
   final String receiverPseudo;
 
   const ChatScreen({
     super.key,
     required this.senderPhone,
+    required this.senderPseudo,
     required this.receiverPhone,
     required this.receiverPseudo,
   });
@@ -23,21 +27,25 @@ class _ChatScreenState extends State<ChatScreen> {
   final _scrollController = ScrollController();
   List<Map<String, dynamic>> _messages = [];
   bool _isLoading = true;
-  RealtimeChannel? _messagesChannel;
+  RealtimeChannel? _conversationChannel;
+
+  // Délai avant qu'un message lu ne disparaisse définitivement (des deux
+  // côtés + base de données), à partir du moment où il a été affiché.
+  static const Duration _disappearDelay = Duration(seconds: 20);
+  Timer? _deleteTimer;
 
   @override
   void initState() {
     super.initState();
     _loadMessages();
-    _markMessagesAsRead();
-    _subscribeToNewMessages();
+    _subscribeToConversation();
   }
 
-  void _subscribeToNewMessages() {
-    _messagesChannel = MessageService.subscribeToIncomingMessages(
+  void _subscribeToConversation() {
+    _conversationChannel = MessageService.subscribeToConversation(
       myPhone: widget.senderPhone,
-      channelName: 'chat_${widget.senderPhone}_${widget.receiverPhone}',
-      onInsert: (message) {
+      otherPhone: widget.receiverPhone,
+      onNewMessage: (message) {
         // On ne traite que les messages venant de la personne avec qui
         // on discute actuellement dans cet écran.
         if (message['sender_phone'] != widget.receiverPhone) return;
@@ -46,8 +54,17 @@ class _ChatScreenState extends State<ChatScreen> {
         setState(() {
           _messages.add(message);
         });
-        _markMessagesAsRead();
         _scrollToBottom();
+        // On vient d'afficher ce message -> il disparaîtra dans 20s.
+        _scheduleDeleteReadMessages();
+      },
+      onMessagesDeleted: (ids) {
+        // L'autre personne vient de lire (et donc supprimer) des messages
+        // que je lui ai envoyés : ils doivent disparaître de mon écran aussi.
+        if (!mounted) return;
+        setState(() {
+          _messages.removeWhere((m) => ids.contains(m['id']));
+        });
       },
     );
   }
@@ -68,8 +85,9 @@ class _ChatScreenState extends State<ChatScreen> {
   void dispose() {
     _messageController.dispose();
     _scrollController.dispose();
-    if (_messagesChannel != null) {
-      MessageService.unsubscribe(_messagesChannel!);
+    _deleteTimer?.cancel();
+    if (_conversationChannel != null) {
+      MessageService.unsubscribe(_conversationChannel!);
     }
     super.dispose();
   }
@@ -86,13 +104,46 @@ class _ChatScreenState extends State<ChatScreen> {
       });
       _scrollToBottom();
     }
+    // On vient d'afficher la conversation : les messages reçus sont donc
+    // "ouverts" -> ils disparaîtront dans 20 secondes.
+    _scheduleDeleteReadMessages();
   }
 
-  Future<void> _markMessagesAsRead() async {
-    await MessageService.markAsRead(
-      senderPhone: widget.receiverPhone,
-      receiverPhone: widget.senderPhone,
+  // (Re)démarre le compte à rebours de 20s avant suppression définitive
+  // des messages reçus et non encore lus. Si un nouveau message arrive
+  // pendant que la conversation est ouverte, on redémarre le délai pour lui
+  // laisser, à lui aussi, ses 20 secondes.
+  void _scheduleDeleteReadMessages() {
+    _deleteTimer?.cancel();
+    _deleteTimer = Timer(_disappearDelay, _markAsReadAndDelete);
+  }
+
+  // Supprime définitivement (base de données + écran local + écran de
+  // l'expéditeur s'il est ouvert) les messages que je viens de lire.
+  Future<void> _markAsReadAndDelete() async {
+    final deleted = await MessageService.deleteReadMessages(
+      senderPhone: widget.receiverPhone, // l'autre personne, qui a envoyé
+      receiverPhone: widget.senderPhone, // moi, qui viens de lire
     );
+
+    if (deleted.isEmpty) return;
+
+    final ids = deleted.map((m) => m['id']).toList();
+
+    if (mounted) {
+      setState(() {
+        _messages.removeWhere((m) => ids.contains(m['id']));
+      });
+    }
+
+    // Prévenir l'expéditeur en temps réel, si sa conversation est ouverte,
+    // pour que le message disparaisse aussi de son côté.
+    if (_conversationChannel != null) {
+      await MessageService.broadcastMessagesDeleted(
+        channel: _conversationChannel!,
+        ids: ids,
+      );
+    }
   }
 
   void _sendMessage() async {
@@ -100,6 +151,16 @@ class _ChatScreenState extends State<ChatScreen> {
 
     String content = _messageController.text.trim();
     _messageController.clear();
+
+    // S'assure que la conversation apparaîtra automatiquement dans la
+    // liste des messages des DEUX personnes (pas seulement chez moi),
+    // même si l'autre ne m'a jamais ajouté comme contact.
+    await ContactService.ensureMutualContact(
+      phoneA: widget.senderPhone,
+      pseudoA: widget.senderPseudo,
+      phoneB: widget.receiverPhone,
+      pseudoB: widget.receiverPseudo,
+    );
 
     await MessageService.sendMessage(
       senderPhone: widget.senderPhone,

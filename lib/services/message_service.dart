@@ -42,19 +42,26 @@ class MessageService {
     }
   }
 
-  static Future<void> markAsRead({
+  // Messages éphémères : dès que [receiverPhone] lit les messages envoyés
+  // par [senderPhone], on les supprime DÉFINITIVEMENT de la base de données
+  // (et pas seulement marqués comme lus). Retourne les lignes supprimées
+  // (avec leur id) pour pouvoir les retirer aussi de l'écran local.
+  static Future<List<Map<String, dynamic>>> deleteReadMessages({
     required String senderPhone,
     required String receiverPhone,
   }) async {
     try {
-      await SupabaseService.client
+      final deleted = await SupabaseService.client
           .from('messages')
-          .update({'is_read': true})
+          .delete()
           .eq('sender_phone', senderPhone)
           .eq('receiver_phone', receiverPhone)
-          .eq('is_read', false);
+          .select('id');
+
+      return List<Map<String, dynamic>>.from(deleted);
     } catch (e) {
-      print('Erreur marquage lecture: $e');
+      print('Erreur suppression des messages lus: $e');
+      return [];
     }
   }
 
@@ -98,11 +105,65 @@ class MessageService {
     }
   }
 
+  // Écoute en temps réel, pour une conversation donnée entre [myPhone] et
+  // [otherPhone] :
+  //  - les nouveaux messages qui arrivent (onNewMessage)
+  //  - les suppressions de messages "lus" côté en face (onMessagesDeleted),
+  //    diffusées via un broadcast (pas besoin de config DB supplémentaire).
+  // Un seul canal, nommé de façon stable (peu importe qui l'ouvre en
+  // premier), est partagé par les deux participants de la conversation.
+  static RealtimeChannel subscribeToConversation({
+    required String myPhone,
+    required String otherPhone,
+    required void Function(Map<String, dynamic> message) onNewMessage,
+    required void Function(List<dynamic> deletedIds) onMessagesDeleted,
+  }) {
+    final pair = [myPhone, otherPhone]..sort();
+    final channelName = 'conv_${pair[0]}_${pair[1]}';
+
+    final channel = SupabaseService.client.channel(channelName);
+
+    channel
+        .onPostgresChanges(
+          event: PostgresChangeEvent.insert,
+          schema: 'public',
+          table: 'messages',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'receiver_phone',
+            value: myPhone,
+          ),
+          callback: (payload) => onNewMessage(payload.newRecord),
+        )
+        .onBroadcast(
+          event: 'messages_deleted',
+          callback: (payload) {
+            final ids = payload['ids'] as List<dynamic>? ?? [];
+            onMessagesDeleted(ids);
+          },
+        )
+        .subscribe();
+
+    return channel;
+  }
+
+  // Diffuse aux autres abonnés du canal la liste des messages qui viennent
+  // d'être lus et supprimés, pour qu'ils disparaissent aussi de leur écran
+  // en temps réel s'ils ont la conversation ouverte.
+  static Future<void> broadcastMessagesDeleted({
+    required RealtimeChannel channel,
+    required List<dynamic> ids,
+  }) async {
+    if (ids.isEmpty) return;
+    await channel.sendBroadcastMessage(
+      event: 'messages_deleted',
+      payload: {'ids': ids},
+    );
+  }
+
   // Écoute en temps réel les nouveaux messages reçus par [myPhone].
-  // [onInsert] est appelé avec la ligne du nouveau message dès qu'elle
-  // arrive, sans avoir besoin de recharger manuellement la conversation.
-  // Un identifiant unique (channelName) évite les conflits si plusieurs
-  // écrans s'abonnent en même temps.
+  // Utilisé par la liste des conversations (badges/aperçus), qui n'a pas
+  // besoin de savoir précisément QUELLE conversation a bougé.
   static RealtimeChannel subscribeToIncomingMessages({
     required String myPhone,
     required void Function(Map<String, dynamic> message) onInsert,

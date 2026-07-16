@@ -73,9 +73,12 @@ class _NewConversationScreenState extends State<NewConversationScreen> {
       _filteredContacts = query.isEmpty
           ? _contacts
           : _contacts
-              .where((c) =>
-                  (c['pseudo'] as String? ?? '').toLowerCase().contains(query))
-              .toList();
+                .where(
+                  (c) => (c['pseudo'] as String? ?? '').toLowerCase().contains(
+                    query,
+                  ),
+                )
+                .toList();
     });
   }
 
@@ -85,6 +88,7 @@ class _NewConversationScreenState extends State<NewConversationScreen> {
       MaterialPageRoute(
         builder: (context) => ChatScreen(
           senderPhone: widget.phoneNumber,
+          senderPseudo: widget.pseudo,
           receiverPhone: contact['phone_number'],
           receiverPseudo: contact['pseudo'],
         ),
@@ -123,46 +127,44 @@ class _NewConversationScreenState extends State<NewConversationScreen> {
                     child: CircularProgressIndicator(color: Color(0xFF2AABEE)),
                   )
                 : _filteredContacts.isEmpty
-                    ? _buildEmptyState()
-                    : ListView.builder(
-                        itemCount: _filteredContacts.length,
-                        itemBuilder: (context, index) {
-                          final contact = _filteredContacts[index];
-                          final pseudo = (contact['pseudo'] as String?) ?? '';
-                          final isOnline = contact['is_online'] == true;
+                ? _buildEmptyState()
+                : ListView.builder(
+                    itemCount: _filteredContacts.length,
+                    itemBuilder: (context, index) {
+                      final contact = _filteredContacts[index];
+                      final pseudo = (contact['pseudo'] as String?) ?? '';
+                      final isOnline = contact['is_online'] == true;
 
-                          return ListTile(
-                            leading: CircleAvatar(
-                              radius: 26,
-                              backgroundColor: const Color(0xFF2AABEE),
-                              child: Text(
-                                pseudo.isNotEmpty
-                                    ? pseudo[0].toUpperCase()
-                                    : '?',
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
+                      return ListTile(
+                        leading: CircleAvatar(
+                          radius: 26,
+                          backgroundColor: const Color(0xFF2AABEE),
+                          child: Text(
+                            pseudo.isNotEmpty ? pseudo[0].toUpperCase() : '?',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold,
                             ),
-                            title: Text(
-                              pseudo,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                            subtitle: Text(
-                              isOnline ? 'En ligne' : 'Hors ligne',
-                              style: TextStyle(
-                                color: isOnline ? Colors.green : Colors.grey[500],
-                                fontSize: 12,
-                              ),
-                            ),
-                            onTap: () => _startConversation(contact),
-                          );
-                        },
-                      ),
+                          ),
+                        ),
+                        title: Text(
+                          pseudo,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        subtitle: Text(
+                          isOnline ? 'En ligne' : 'Hors ligne',
+                          style: TextStyle(
+                            color: isOnline ? Colors.green : Colors.grey[500],
+                            fontSize: 12,
+                          ),
+                        ),
+                        onTap: () => _startConversation(contact),
+                      );
+                    },
+                  ),
           ),
         ],
       ),

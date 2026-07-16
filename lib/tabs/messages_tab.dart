@@ -81,7 +81,8 @@ class MessagesTabState extends State<MessagesTab> {
       } else if (result == 0) {
         message = 'Aucun nouveau contact trouvé sur l\'application.';
       } else {
-        message = '$result nouveau${result > 1 ? "x" : ""} contact'
+        message =
+            '$result nouveau${result > 1 ? "x" : ""} contact'
             '${result > 1 ? "s" : ""} ajouté${result > 1 ? "s" : ""} !';
       }
       ScaffoldMessenger.of(context).showSnackBar(
@@ -174,6 +175,7 @@ class MessagesTabState extends State<MessagesTab> {
       MaterialPageRoute(
         builder: (context) => ChatScreen(
           senderPhone: widget.phoneNumber,
+          senderPseudo: widget.pseudo,
           receiverPhone: user['phone_number'],
           receiverPseudo: user['pseudo'],
         ),
@@ -216,7 +218,9 @@ class MessagesTabState extends State<MessagesTab> {
             ),
           ),
         ),
-        Expanded(child: _isSearching ? _buildSearchResults() : _buildContactsList()),
+        Expanded(
+          child: _isSearching ? _buildSearchResults() : _buildContactsList(),
+        ),
       ],
     );
   }
@@ -250,13 +254,25 @@ class MessagesTabState extends State<MessagesTab> {
             backgroundColor: const Color(0xFF2AABEE),
             child: Text(
               pseudo.isNotEmpty ? pseudo[0].toUpperCase() : '?',
-              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+              ),
             ),
           ),
-          title: Text(pseudo, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          title: Text(
+            pseudo,
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
           subtitle: Text(
             isOnline ? 'En ligne' : 'Hors ligne',
-            style: TextStyle(color: isOnline ? Colors.green : Colors.grey[500], fontSize: 12),
+            style: TextStyle(
+              color: isOnline ? Colors.green : Colors.grey[500],
+              fontSize: 12,
+            ),
           ),
           onTap: () => _openChatWithUser(user),
         );
@@ -381,6 +397,7 @@ class MessagesTabState extends State<MessagesTab> {
             MaterialPageRoute(
               builder: (context) => ChatScreen(
                 senderPhone: widget.phoneNumber,
+                senderPseudo: widget.pseudo,
                 receiverPhone: contact['contact_phone'],
                 receiverPseudo: contact['contact_pseudo'],
               ),
