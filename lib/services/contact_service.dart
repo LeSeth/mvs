@@ -125,29 +125,31 @@ class ContactService {
   }
 
   // Ajoute un contact s'il n'existe pas déjà pour cet utilisateur.
-  // Retourne true si un nouveau contact a été inséré.
+  // Utilise un upsert atomique (au lieu de vérifier puis insérer) pour
+  // éviter les erreurs en cas de doublons déjà présents ou d'accès
+  // concurrent. Retourne true si un nouveau contact a été inséré.
   static Future<bool> addContactIfNotExists({
     required String userPhone,
     required String contactPhoneHash,
     required String contactPseudo,
   }) async {
     try {
-      final existingContact = await SupabaseService.client
+      final result = await SupabaseService.client
           .from('contacts')
-          .select()
-          .eq('user_phone', userPhone)
-          .eq('contact_phone_hash', contactPhoneHash)
-          .maybeSingle();
+          .upsert(
+            {
+              'user_phone': userPhone,
+              'contact_phone_hash': contactPhoneHash,
+              'contact_pseudo': contactPseudo,
+            },
+            onConflict: 'user_phone,contact_phone_hash',
+            ignoreDuplicates: true, // ne touche pas à une ligne existante
+          )
+          .select();
 
-      if (existingContact == null) {
-        await SupabaseService.client.from('contacts').insert({
-          'user_phone': userPhone,
-          'contact_phone_hash': contactPhoneHash,
-          'contact_pseudo': contactPseudo,
-        });
-        return true;
-      }
-      return false;
+      // Si upsert a réellement inséré une ligne, elle est renvoyée ;
+      // si la ligne existait déjà (ignorée), le résultat est vide.
+      return result.isNotEmpty;
     } catch (e) {
       print('Erreur ajout contact: $e');
       return false;
@@ -155,10 +157,12 @@ class ContactService {
   }
 
   // Garantit que [phoneA] et [phoneB] sont mutuellement dans les contacts
-  // l'un de l'autre. Appelé à chaque envoi de message : c'est ce qui permet
-  // à la conversation d'apparaître automatiquement dans la liste des
-  // messages des DEUX personnes, même si elles ne se sont jamais
-  // synchronisées via leurs contacts téléphone ou la recherche.
+  // l'un de l'autre, ET marque la conversation comme "active" (met à jour
+  // last_message_at). Appelé à chaque envoi de message : c'est ce qui
+  // permet à la conversation d'apparaître automatiquement dans la liste
+  // des messages des DEUX personnes (triée par message le plus récent),
+  // même si elles ne se sont jamais synchronisées via leurs contacts
+  // téléphone ou la recherche.
   static Future<void> ensureMutualContact({
     required String phoneA,
     required String pseudoA,
@@ -168,19 +172,54 @@ class ContactService {
     final hashA = SupabaseService.hashPhoneNumber(phoneA);
     final hashB = SupabaseService.hashPhoneNumber(phoneB);
 
-    await addContactIfNotExists(
+    await touchConversation(
       userPhone: phoneA,
       contactPhoneHash: hashB,
       contactPseudo: pseudoB,
     );
-    await addContactIfNotExists(
+    await touchConversation(
       userPhone: phoneB,
       contactPhoneHash: hashA,
       contactPseudo: pseudoA,
     );
   }
 
-  // Récupérer les contacts synchronisés
+  // Crée le contact s'il n'existe pas encore, et met à jour son
+  // last_message_at à "maintenant" dans tous les cas (upsert atomique,
+  // fiable même en cas de doublons ou d'accès concurrent). C'est ce champ
+  // qui fait la différence entre :
+  //  - un simple contact synchronisé depuis le téléphone (last_message_at
+  //    == null) -> visible seulement dans "Nouvelle conversation".
+  //  - une vraie conversation (last_message_at renseigné) -> visible dans
+  //    l'onglet Messages, triée par date décroissante (comme une vraie
+  //    messagerie : la dernière personne à qui on a écrit remonte en haut).
+  static Future<void> touchConversation({
+    required String userPhone,
+    required String contactPhoneHash,
+    required String contactPseudo,
+  }) async {
+    try {
+      final now = DateTime.now().toIso8601String();
+
+      await SupabaseService.client.from('contacts').upsert(
+        {
+          'user_phone': userPhone,
+          'contact_phone_hash': contactPhoneHash,
+          'contact_pseudo': contactPseudo,
+          'last_message_at': now,
+        },
+        onConflict: 'user_phone,contact_phone_hash',
+        // ignoreDuplicates=false (par défaut) : on VEUT écraser
+        // last_message_at à chaque nouveau message, contrairement à
+        // addContactIfNotExists.
+      );
+    } catch (e) {
+      print('Erreur mise à jour de la conversation: $e');
+    }
+  }
+
+  // Récupérer les contacts synchronisés (TOUS, avec ou sans conversation
+  // en cours). Utilisé par l'écran "Nouvelle conversation" (bouton flottant).
   static Future<List<Map<String, dynamic>>> getContacts(
     String userPhone,
   ) async {
@@ -194,6 +233,27 @@ class ContactService {
       return List<Map<String, dynamic>>.from(contacts);
     } catch (e) {
       print('Erreur récupération contacts: $e');
+      return [];
+    }
+  }
+
+  // Récupérer uniquement les VRAIES conversations (au moins un message
+  // échangé), triées par message le plus récent en premier -- comme une
+  // vraie messagerie. Utilisé par l'onglet Messages.
+  static Future<List<Map<String, dynamic>>> getConversations(
+    String userPhone,
+  ) async {
+    try {
+      final contacts = await SupabaseService.client
+          .from('contacts')
+          .select()
+          .eq('user_phone', userPhone)
+          .not('last_message_at', 'is', null)
+          .order('last_message_at', ascending: false);
+
+      return List<Map<String, dynamic>>.from(contacts);
+    } catch (e) {
+      print('Erreur récupération conversations: $e');
       return [];
     }
   }

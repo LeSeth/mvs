@@ -5,7 +5,6 @@ import '../tabs/statuts_tab.dart';
 import '../tabs/parametres_tab.dart';
 import 'login_screen.dart';
 import 'new_conversation_screen.dart';
-import 'create_group_screen.dart';
 import '../services/supabase_service.dart';
 import '../services/auth_storage.dart';
 
@@ -30,7 +29,6 @@ class _HomeScreenState extends State<HomeScreen>
   late TabController _tabController;
   final GlobalKey<MessagesTabState> _messagesTabKey =
       GlobalKey<MessagesTabState>();
-  int _totalUnread = 0;
 
   @override
   void initState() {
@@ -64,24 +62,6 @@ class _HomeScreenState extends State<HomeScreen>
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        leading: Padding(
-          padding: const EdgeInsets.only(left: 12),
-          child: GestureDetector(
-            onTap: () => _tabController.animateTo(3), // ouvre Paramètres
-            child: CircleAvatar(
-              radius: 18,
-              backgroundColor: const Color(0xFF2AABEE),
-              child: Text(
-                widget.pseudo.isNotEmpty ? widget.pseudo[0].toUpperCase() : '?',
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ),
-          ),
-        ),
-        leadingWidth: 56,
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -103,6 +83,19 @@ class _HomeScreenState extends State<HomeScreen>
             },
           ),
         ],
+        bottom: TabBar(
+          controller: _tabController,
+          indicatorColor: const Color(0xFF2AABEE),
+          indicatorWeight: 3,
+          labelColor: const Color(0xFF2AABEE),
+          unselectedLabelColor: Colors.grey,
+          tabs: const [
+            Tab(text: 'Messages'),
+            Tab(text: 'Vidéos'),
+            Tab(text: 'Statuts'),
+            Tab(text: 'Paramètres'),
+          ],
+        ),
       ),
       body: TabBarView(
         controller: _tabController,
@@ -112,9 +105,6 @@ class _HomeScreenState extends State<HomeScreen>
             phoneNumber: widget.phoneNumber,
             pseudo: widget.pseudo,
             userId: widget.userId,
-            onUnreadCountChanged: (count) {
-              if (mounted) setState(() => _totalUnread = count);
-            },
           ),
           const VideosTab(),
           const StatutsTab(),
@@ -140,127 +130,6 @@ class _HomeScreenState extends State<HomeScreen>
               },
             )
           : null,
-      bottomNavigationBar: _buildBottomNavBar(),
-    );
-  }
-
-  // Barre de navigation façon Telegram : icône + libellé pour chaque
-  // onglet, avec un badge de messages non lus sur "Messages".
-  Widget _buildBottomNavBar() {
-    final items = [
-      (
-        icon: Icons.chat_bubble_outline,
-        activeIcon: Icons.chat_bubble,
-        label: 'Messages',
-      ),
-      (
-        icon: Icons.videocam_outlined,
-        activeIcon: Icons.videocam,
-        label: 'Vidéos',
-      ),
-      (
-        icon: Icons.photo_camera_outlined,
-        activeIcon: Icons.photo_camera,
-        label: 'Statuts',
-      ),
-      (
-        icon: Icons.settings_outlined,
-        activeIcon: Icons.settings,
-        label: 'Paramètres',
-      ),
-    ];
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-      child: Container(
-        decoration: BoxDecoration(
-          color: const Color(0xFF1F2C34),
-          borderRadius: BorderRadius.circular(20),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.25),
-              blurRadius: 12,
-              offset: const Offset(0, 4),
-            ),
-          ],
-        ),
-        child: SafeArea(
-          top: false,
-          child: SizedBox(
-            height: 58,
-            child: Row(
-              children: List.generate(items.length, (index) {
-                final item = items[index];
-                final isSelected = _tabController.index == index;
-                final color = isSelected
-                    ? const Color(0xFF2AABEE)
-                    : Colors.grey;
-
-                return Expanded(
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(20),
-                    onTap: () => _tabController.animateTo(index),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Stack(
-                          clipBehavior: Clip.none,
-                          children: [
-                            Icon(
-                              isSelected ? item.activeIcon : item.icon,
-                              color: color,
-                              size: 24,
-                            ),
-                            if (index == 0 && _totalUnread > 0)
-                              Positioned(
-                                right: -8,
-                                top: -4,
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 5,
-                                    vertical: 1,
-                                  ),
-                                  constraints: const BoxConstraints(
-                                    minWidth: 16,
-                                    minHeight: 16,
-                                  ),
-                                  decoration: const BoxDecoration(
-                                    color: Color(0xFF2AABEE),
-                                    shape: BoxShape.circle,
-                                  ),
-                                  child: Text(
-                                    _totalUnread > 99 ? '99+' : '$_totalUnread',
-                                    textAlign: TextAlign.center,
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                          ],
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          item.label,
-                          style: TextStyle(
-                            color: color,
-                            fontSize: 11,
-                            fontWeight: isSelected
-                                ? FontWeight.bold
-                                : FontWeight.normal,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                );
-              }),
-            ),
-          ),
-        ),
-      ),
     );
   }
 
@@ -278,19 +147,7 @@ class _HomeScreenState extends State<HomeScreen>
                   'Nouveau groupe',
                   style: TextStyle(color: Colors.white),
                 ),
-                onTap: () async {
-                  Navigator.pop(context);
-                  await Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) => CreateGroupScreen(
-                        phoneNumber: widget.phoneNumber,
-                        pseudo: widget.pseudo,
-                      ),
-                    ),
-                  );
-                  _messagesTabKey.currentState?.refreshContacts();
-                },
+                onTap: () => Navigator.pop(context),
               ),
               ListTile(
                 leading: const Icon(Icons.campaign, color: Colors.white70),

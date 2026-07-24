@@ -4,23 +4,19 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/contact_service.dart';
 import '../services/message_service.dart';
 import '../services/supabase_service.dart';
-import '../services/group_service.dart';
 import '../screens/chat_screen.dart';
-import '../screens/group_chat_screen.dart';
 import '../screens/new_conversation_screen.dart';
 
 class MessagesTab extends StatefulWidget {
   final String phoneNumber;
   final String pseudo;
   final String userId;
-  final void Function(int totalUnread)? onUnreadCountChanged;
 
   const MessagesTab({
     super.key,
     required this.phoneNumber,
     required this.pseudo,
     required this.userId,
-    this.onUnreadCountChanged,
   });
 
   @override
@@ -32,8 +28,6 @@ class MessagesTab extends StatefulWidget {
 // conversation lancée depuis le bouton flottant dans HomeScreen).
 class MessagesTabState extends State<MessagesTab> {
   List<Map<String, dynamic>> _contacts = [];
-  List<Map<String, dynamic>> _groups = [];
-  List<Map<String, dynamic>> _combinedItems = [];
   bool _isLoading = true;
 
   final TextEditingController _searchController = TextEditingController();
@@ -42,7 +36,6 @@ class MessagesTabState extends State<MessagesTab> {
   bool _isSearching = false;
   bool _searchLoading = false;
   RealtimeChannel? _messagesChannel;
-  RealtimeChannel? _groupMessagesChannel;
 
   @override
   void initState() {
@@ -58,16 +51,6 @@ class MessagesTabState extends State<MessagesTab> {
         if (mounted) _loadContacts();
       },
     );
-    _groupMessagesChannel = GroupService.subscribeToAllGroupMessages(
-      channelName: 'group_messages_list_${widget.phoneNumber}',
-      onInsert: (message) {
-        // On ne peut pas filtrer côté serveur "mes groupes uniquement" ;
-        // on vérifie donc côté client si ce message concerne un groupe
-        // dont je suis membre avant de rafraîchir.
-        final isMyGroup = _groups.any((g) => g['id'] == message['group_id']);
-        if (mounted && isMyGroup) _loadContacts();
-      },
-    );
   }
 
   @override
@@ -76,9 +59,6 @@ class MessagesTabState extends State<MessagesTab> {
     _searchController.dispose();
     if (_messagesChannel != null) {
       MessageService.unsubscribe(_messagesChannel!);
-    }
-    if (_groupMessagesChannel != null) {
-      GroupService.unsubscribe(_groupMessagesChannel!);
     }
     super.dispose();
   }
@@ -143,45 +123,12 @@ class MessagesTabState extends State<MessagesTab> {
       });
     }
 
-    // Groupes dont je suis membre
-    final groups = await GroupService.getUserGroups(widget.phoneNumber);
-    List<Map<String, dynamic>> groupsWithMessages = [];
-    for (var group in groups) {
-      final lastMessage = await GroupService.getLastGroupMessage(
-        group['id'].toString(),
-      );
-      groupsWithMessages.add({...group, 'last_message': lastMessage});
-    }
-
-    // Fusionne conversations 1-à-1 et groupes dans une seule liste,
-    // triée par activité la plus récente (comme une vraie messagerie).
-    final combined = <Map<String, dynamic>>[
-      ...contactsWithMessages.map((c) => {'type': 'direct', ...c}),
-      ...groupsWithMessages.map((g) => {'type': 'group', ...g}),
-    ];
-    combined.sort((a, b) {
-      final aTime = a['last_message_at'];
-      final bTime = b['last_message_at'];
-      if (aTime == null && bTime == null) return 0;
-      if (aTime == null) return 1;
-      if (bTime == null) return -1;
-      return DateTime.parse(bTime).compareTo(DateTime.parse(aTime));
-    });
-
     if (mounted) {
       setState(() {
         _contacts = contactsWithMessages;
-        _groups = groupsWithMessages;
-        _combinedItems = combined;
         _isLoading = false;
       });
     }
-
-    final totalUnread = contactsWithMessages.fold<int>(
-      0,
-      (sum, c) => sum + (c['unread_count'] as int? ?? 0),
-    );
-    widget.onUnreadCountChanged?.call(totalUnread);
   }
 
   void _onSearchChanged() {
@@ -333,7 +280,7 @@ class MessagesTabState extends State<MessagesTab> {
       );
     }
 
-    if (_combinedItems.isEmpty) {
+    if (_contacts.isEmpty) {
       return Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -382,61 +329,10 @@ class MessagesTabState extends State<MessagesTab> {
     return RefreshIndicator(
       onRefresh: () => _syncAndLoadContacts(showFeedback: true),
       child: ListView.builder(
-        itemCount: _combinedItems.length,
+        itemCount: _contacts.length,
         itemBuilder: (context, index) {
-          final item = _combinedItems[index];
-          if (item['type'] == 'group') {
-            return _buildGroupItem(item);
-          }
-          return _buildContactItem(item);
-        },
-      ),
-    );
-  }
-
-  Widget _buildGroupItem(Map<String, dynamic> group) {
-    final lastMessage = group['last_message'];
-
-    return Card(
-      color: const Color(0xFF1F2C34),
-      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      elevation: 0,
-      child: ListTile(
-        leading: const CircleAvatar(
-          radius: 28,
-          backgroundColor: Color(0xFF6C63FF),
-          child: Icon(Icons.group, color: Colors.white),
-        ),
-        title: Text(
-          group['name'] ?? '',
-          style: const TextStyle(
-            fontWeight: FontWeight.bold,
-            color: Colors.white,
-          ),
-        ),
-        subtitle: lastMessage != null
-            ? Text(
-                '${lastMessage['sender_pseudo']}: ${lastMessage['content']}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(color: Colors.grey[400], fontSize: 14),
-              )
-            : Text(
-                'Groupe créé',
-                style: TextStyle(color: Colors.grey[600], fontSize: 14),
-              ),
-        onTap: () {
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (context) => GroupChatScreen(
-                groupId: group['id'].toString(),
-                groupName: group['name'],
-                myPhone: widget.phoneNumber,
-                myPseudo: widget.pseudo,
-              ),
-            ),
-          ).then((_) => _loadContacts());
+          final contact = _contacts[index];
+          return _buildContactItem(contact);
         },
       ),
     );
