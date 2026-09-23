@@ -30,9 +30,13 @@ class _ChatScreenState extends State<ChatScreen> {
   RealtimeChannel? _conversationChannel;
 
   // Délai avant qu'un message lu ne disparaisse définitivement (des deux
-  // côtés + base de données), à partir du moment où il a été affiché.
+  // côtés + base de données), à partir du moment où IL a été affiché.
+  // Chaque message a son propre minuteur indépendant (et non un minuteur
+  // unique partagé), sinon un nouveau message reçu redémarrait le compte
+  // à rebours de TOUS les messages, et ils disparaissaient tous en même
+  // temps au lieu d'un vrai FIFO (le plus ancien en premier).
   static const Duration _disappearDelay = Duration(seconds: 20);
-  Timer? _deleteTimer;
+  final Map<dynamic, Timer> _messageTimers = {};
 
   @override
   void initState() {
@@ -55,8 +59,9 @@ class _ChatScreenState extends State<ChatScreen> {
           _messages.add(message);
         });
         _scrollToBottom();
-        // On vient d'afficher ce message -> il disparaîtra dans 20s.
-        _scheduleDeleteReadMessages();
+        // Ce message précis vient d'être affiché -> il aura SON PROPRE
+        // délai de 20s, indépendant des autres.
+        _scheduleMessageDeletion(message);
       },
       onMessagesDeleted: (ids) {
         // L'autre personne vient de lire (et donc supprimer) des messages
@@ -65,6 +70,9 @@ class _ChatScreenState extends State<ChatScreen> {
         setState(() {
           _messages.removeWhere((m) => ids.contains(m['id']));
         });
+        for (final id in ids) {
+          _messageTimers.remove(id)?.cancel();
+        }
       },
     );
   }
@@ -85,7 +93,10 @@ class _ChatScreenState extends State<ChatScreen> {
   void dispose() {
     _messageController.dispose();
     _scrollController.dispose();
-    _deleteTimer?.cancel();
+    for (final timer in _messageTimers.values) {
+      timer.cancel();
+    }
+    _messageTimers.clear();
     if (_conversationChannel != null) {
       MessageService.unsubscribe(_conversationChannel!);
     }
@@ -104,35 +115,38 @@ class _ChatScreenState extends State<ChatScreen> {
       });
       _scrollToBottom();
     }
-    // On vient d'afficher la conversation : les messages reçus sont donc
-    // "ouverts" -> ils disparaîtront dans 20 secondes.
-    _scheduleDeleteReadMessages();
+    // On vient d'afficher la conversation : chaque message reçu (pas les
+    // miens) démarre SON PROPRE compte à rebours de 20s, indépendamment
+    // des autres -> FIFO respecté même si plusieurs messages étaient déjà
+    // en attente.
+    for (final message in _messages) {
+      _scheduleMessageDeletion(message);
+    }
   }
 
-  // (Re)démarre le compte à rebours de 20s avant suppression définitive
-  // des messages reçus et non encore lus. Si un nouveau message arrive
-  // pendant que la conversation est ouverte, on redémarre le délai pour lui
-  // laisser, à lui aussi, ses 20 secondes.
-  void _scheduleDeleteReadMessages() {
-    _deleteTimer?.cancel();
-    _deleteTimer = Timer(_disappearDelay, _markAsReadAndDelete);
+  // Démarre (une seule fois par message) le compte à rebours de 20s avant
+  // suppression définitive de CE message précis.
+  void _scheduleMessageDeletion(Map<String, dynamic> message) {
+    if (message['sender_phone'] != widget.receiverPhone) {
+      return; // je ne supprime pas mes propres messages tout seul
+    }
+    final id = message['id'];
+    if (_messageTimers.containsKey(id)) return; // déjà programmé
+
+    _messageTimers[id] = Timer(_disappearDelay, () => _deleteSingleMessage(id));
   }
 
   // Supprime définitivement (base de données + écran local + écran de
-  // l'expéditeur s'il est ouvert) les messages que je viens de lire.
-  Future<void> _markAsReadAndDelete() async {
-    final deleted = await MessageService.deleteReadMessages(
-      senderPhone: widget.receiverPhone, // l'autre personne, qui a envoyé
-      receiverPhone: widget.senderPhone, // moi, qui viens de lire
-    );
+  // l'expéditeur s'il est ouvert) UN SEUL message précis.
+  Future<void> _deleteSingleMessage(dynamic id) async {
+    _messageTimers.remove(id);
 
-    if (deleted.isEmpty) return;
-
-    final ids = deleted.map((m) => m['id']).toList();
+    final deleted = await MessageService.deleteMessageById(id);
+    if (!deleted) return;
 
     if (mounted) {
       setState(() {
-        _messages.removeWhere((m) => ids.contains(m['id']));
+        _messages.removeWhere((m) => m['id'] == id);
       });
     }
 
@@ -141,7 +155,7 @@ class _ChatScreenState extends State<ChatScreen> {
     if (_conversationChannel != null) {
       await MessageService.broadcastMessagesDeleted(
         channel: _conversationChannel!,
-        ids: ids,
+        ids: [id],
       );
     }
   }
@@ -196,21 +210,30 @@ class _ChatScreenState extends State<ChatScreen> {
       body: Column(
         children: [
           Expanded(
-            child: _isLoading
-                ? const Center(
-                    child: CircularProgressIndicator(color: Color(0xFF2AABEE)),
-                  )
-                : ListView.builder(
-                    controller: _scrollController,
-                    reverse: false,
-                    padding: const EdgeInsets.all(16),
-                    itemCount: _messages.length,
-                    itemBuilder: (context, index) {
-                      final message = _messages[index];
-                      bool isMe = message['sender_phone'] == widget.senderPhone;
-                      return _buildMessageBubble(message, isMe);
-                    },
-                  ),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                Image.asset('assets/chat_wallpaper.png', fit: BoxFit.cover),
+                _isLoading
+                    ? const Center(
+                        child: CircularProgressIndicator(
+                          color: Color(0xFF2AABEE),
+                        ),
+                      )
+                    : ListView.builder(
+                        controller: _scrollController,
+                        reverse: false,
+                        padding: const EdgeInsets.all(16),
+                        itemCount: _messages.length,
+                        itemBuilder: (context, index) {
+                          final message = _messages[index];
+                          bool isMe =
+                              message['sender_phone'] == widget.senderPhone;
+                          return _buildMessageBubble(message, isMe);
+                        },
+                      ),
+              ],
+            ),
           ),
           _buildMessageInput(),
         ],

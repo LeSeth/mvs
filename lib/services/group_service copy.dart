@@ -7,12 +7,6 @@ import 'supabase_service.dart';
 // l'écran d'un membre dès que CE membre l'a lu (+ 20s). Il n'est supprimé
 // de la base (et donc de chez TOUT LE MONDE, y compris l'expéditeur) que
 // lorsque TOUS les autres membres du groupe l'ont lu.
-//
-// IMPORTANT : dans "group_messages", sender_phone stocke désormais le HASH
-// du numéro (comme users.phone_hash), pas le numéro en clair. Les autres
-// tables (group_members.member_phone, group_message_reads.member_phone)
-// continuent d'utiliser le vrai numéro : les comparaisons entre les deux
-// se font donc en hashant le côté "vrai numéro" au moment de comparer.
 class GroupService {
   static SupabaseClient get _client => SupabaseService.client;
 
@@ -176,7 +170,7 @@ class GroupService {
     try {
       await _client.from('group_messages').insert({
         'group_id': groupId,
-        'sender_phone': SupabaseService.hashPhoneNumber(senderPhone),
+        'sender_phone': senderPhone,
         'sender_pseudo': senderPseudo,
         'content': content,
       });
@@ -220,15 +214,12 @@ class GroupService {
 
       if (message == null) return true; // déjà supprimé entre-temps
 
-      final senderPhoneHash = message['sender_phone'];
+      final senderPhone = message['sender_phone'];
 
       final members = await getGroupMembers(groupId);
       final requiredReaders = members
           .map((m) => m['member_phone'] as String)
-          .where(
-            (phone) =>
-                SupabaseService.hashPhoneNumber(phone) != senderPhoneHash,
-          )
+          .where((phone) => phone != senderPhone)
           .toSet();
 
       final reads = await _client
@@ -312,34 +303,6 @@ class GroupService {
           schema: 'public',
           table: 'group_messages',
           callback: (payload) => onInsert(payload.newRecord),
-        )
-        .subscribe();
-
-    return channel;
-  }
-
-  // Écoute en temps réel le fait d'être ajouté à un NOUVEAU groupe : dès
-  // qu'une ligne group_members est insérée avec member_phone = myPhone,
-  // le créateur d'un groupe ou un ajout de membre est notifié instantanément
-  // à la personne concernée (sans attendre qu'un message quelconque
-  // déclenche un rechargement par hasard).
-  static RealtimeChannel subscribeToMyGroupMemberships({
-    required String myPhone,
-    required void Function() onNewMembership,
-    required String channelName,
-  }) {
-    final channel = _client
-        .channel(channelName)
-        .onPostgresChanges(
-          event: PostgresChangeEvent.insert,
-          schema: 'public',
-          table: 'group_members',
-          filter: PostgresChangeFilter(
-            type: PostgresChangeFilterType.eq,
-            column: 'member_phone',
-            value: myPhone,
-          ),
-          callback: (payload) => onNewMembership(),
         )
         .subscribe();
 

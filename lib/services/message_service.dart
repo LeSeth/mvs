@@ -42,26 +42,23 @@ class MessageService {
     }
   }
 
-  // Messages éphémères : dès que [receiverPhone] lit les messages envoyés
-  // par [senderPhone], on les supprime DÉFINITIVEMENT de la base de données
-  // (et pas seulement marqués comme lus). Retourne les lignes supprimées
-  // (avec leur id) pour pouvoir les retirer aussi de l'écran local.
-  static Future<List<Map<String, dynamic>>> deleteReadMessages({
-    required String senderPhone,
-    required String receiverPhone,
-  }) async {
+  // Messages éphémères : supprime DÉFINITIVEMENT un seul message précis de
+  // la base de données (pas tous les messages non lus d'un coup), pour que
+  // chaque message ait son propre délai indépendant (FIFO : le plus ancien
+  // affiché disparaît avant les autres). Retourne true si effectivement
+  // supprimé.
+  static Future<bool> deleteMessageById(dynamic id) async {
     try {
       final deleted = await SupabaseService.client
           .from('messages')
           .delete()
-          .eq('sender_phone', senderPhone)
-          .eq('receiver_phone', receiverPhone)
+          .eq('id', id)
           .select('id');
 
-      return List<Map<String, dynamic>>.from(deleted);
+      return deleted.isNotEmpty;
     } catch (e) {
-      print('Erreur suppression des messages lus: $e');
-      return [];
+      print('Erreur suppression du message: $e');
+      return false;
     }
   }
 
@@ -109,7 +106,12 @@ class MessageService {
   // [otherPhone] :
   //  - les nouveaux messages qui arrivent (onNewMessage)
   //  - les suppressions de messages "lus" côté en face (onMessagesDeleted),
-  //    diffusées via un broadcast (pas besoin de config DB supplémentaire).
+  //    détectées de DEUX façons complémentaires :
+  //     1) directement via Postgres Changes DELETE sur la table (fiable,
+  //        ne dépend d'aucune config supplémentaire côté broadcast),
+  //     2) via un broadcast (utile si Postgres Changes DELETE est en
+  //        retard ou indisponible). Les deux mènent au même résultat,
+  //        donc pas de souci si les deux se déclenchent (idempotent).
   // Un seul canal, nommé de façon stable (peu importe qui l'ouvre en
   // premier), est partagé par les deux participants de la conversation.
   static RealtimeChannel subscribeToConversation({
@@ -135,6 +137,27 @@ class MessageService {
           ),
           callback: (payload) => onNewMessage(payload.newRecord),
         )
+        .onPostgresChanges(
+          event: PostgresChangeEvent.delete,
+          schema: 'public',
+          table: 'messages',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'sender_phone',
+            value: myPhone,
+          ),
+          callback: (payload) {
+            // Nécessite "REPLICA IDENTITY FULL" sur la table messages
+            // pour que oldRecord contienne bien receiver_phone (sinon
+            // seul l'id est disponible).
+            final oldRecord = payload.oldRecord;
+            final receiver = oldRecord['receiver_phone'];
+            if (receiver == null || receiver == otherPhone) {
+              final id = oldRecord['id'];
+              if (id != null) onMessagesDeleted([id]);
+            }
+          },
+        )
         .onBroadcast(
           event: 'messages_deleted',
           callback: (payload) {
@@ -149,16 +172,22 @@ class MessageService {
 
   // Diffuse aux autres abonnés du canal la liste des messages qui viennent
   // d'être lus et supprimés, pour qu'ils disparaissent aussi de leur écran
-  // en temps réel s'ils ont la conversation ouverte.
+  // en temps réel s'ils ont la conversation ouverte. Complémentaire à la
+  // détection Postgres Changes DELETE ci-dessus (best effort : les erreurs
+  // ne doivent pas empêcher la suppression, déjà faite en base).
   static Future<void> broadcastMessagesDeleted({
     required RealtimeChannel channel,
     required List<dynamic> ids,
   }) async {
     if (ids.isEmpty) return;
-    await channel.sendBroadcastMessage(
-      event: 'messages_deleted',
-      payload: {'ids': ids},
-    );
+    try {
+      await channel.sendBroadcastMessage(
+        event: 'messages_deleted',
+        payload: {'ids': ids},
+      );
+    } catch (e) {
+      print('Erreur diffusion suppression (broadcast): $e');
+    }
   }
 
   // Écoute en temps réel les nouveaux messages reçus par [myPhone].

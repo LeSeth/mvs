@@ -2,7 +2,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/group_service.dart';
-import '../services/supabase_service.dart';
 
 class GroupChatScreen extends StatefulWidget {
   final String groupId;
@@ -37,11 +36,6 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   // en même temps.
   static const Duration _disappearDelay = Duration(seconds: 20);
   final Map<dynamic, Timer> _messageTimers = {};
-
-  // group_messages.sender_phone est désormais un HASH (comme
-  // users.phone_hash), pas le numéro en clair. On calcule mon hash une
-  // seule fois pour comparer correctement avec message['sender_phone'].
-  late final String _myHash = SupabaseService.hashPhoneNumber(widget.myPhone);
 
   @override
   void initState() {
@@ -101,7 +95,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   // Démarre (une seule fois par message) le compte à rebours de 20s avant
   // que CE message précis ne disparaisse de mon écran.
   void _scheduleMessageRead(Map<String, dynamic> message) {
-    if (message['sender_phone'] == _myHash) {
+    if (message['sender_phone'] == widget.myPhone) {
       return; // je ne fais pas disparaître mes propres messages tout seul
     }
     final id = message['id'];
@@ -203,28 +197,20 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       body: Column(
         children: [
           Expanded(
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                Image.asset('assets/chat_wallpaper.png', fit: BoxFit.cover),
-                _isLoading
-                    ? const Center(
-                        child: CircularProgressIndicator(
-                          color: Color(0xFF2AABEE),
-                        ),
-                      )
-                    : ListView.builder(
-                        controller: _scrollController,
-                        padding: const EdgeInsets.all(16),
-                        itemCount: _messages.length,
-                        itemBuilder: (context, index) {
-                          final message = _messages[index];
-                          final isMe = message['sender_phone'] == _myHash;
-                          return _buildMessageBubble(message, isMe);
-                        },
-                      ),
-              ],
-            ),
+            child: _isLoading
+                ? const Center(
+                    child: CircularProgressIndicator(color: Color(0xFF2AABEE)),
+                  )
+                : ListView.builder(
+                    controller: _scrollController,
+                    padding: const EdgeInsets.all(16),
+                    itemCount: _messages.length,
+                    itemBuilder: (context, index) {
+                      final message = _messages[index];
+                      final isMe = message['sender_phone'] == widget.myPhone;
+                      return _buildMessageBubble(message, isMe);
+                    },
+                  ),
           ),
           _buildMessageInput(),
         ],

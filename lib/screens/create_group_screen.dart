@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../services/contact_service.dart';
 import '../services/group_service.dart';
+import '../services/supabase_service.dart';
 import 'group_chat_screen.dart';
 
 // Permet de créer un groupe à partir de 2 personnes minimum : soi-même +
@@ -74,15 +75,30 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
 
     setState(() => _isCreating = true);
 
-    final members = _contacts
+    final selectedContacts = _contacts
         .where((c) => _selectedPhones.contains(c['contact_phone_hash']))
-        .map(
-          (c) => {
-            'phone': (c['contact_phone'] ?? c['contact_phone_hash']).toString(),
-            'pseudo': c['contact_pseudo'].toString(),
-          },
-        )
         .toList();
+
+    // La table "contacts" ne stocke que le HASH du numéro, pas le vrai
+    // numéro : il faut le résoudre via la table users pour chaque membre,
+    // sinon leur ligne group_members serait créée avec le hash comme
+    // member_phone, et ils ne retrouveraient jamais le groupe (puisque
+    // getUserGroups filtre par le vrai numéro de téléphone).
+    final hashes = selectedContacts
+        .map((c) => c['contact_phone_hash'].toString())
+        .toList();
+    final resolvedUsers = await SupabaseService.findUsersByPhoneHashes(hashes);
+
+    final members = selectedContacts.map((c) {
+      final match = resolvedUsers.firstWhere(
+        (u) => u['phone_hash'] == c['contact_phone_hash'],
+        orElse: () => <String, dynamic>{},
+      );
+      return {
+        'phone': (match['phone_number'] ?? c['contact_phone_hash']).toString(),
+        'pseudo': c['contact_pseudo'].toString(),
+      };
+    }).toList();
 
     final group = await GroupService.createGroup(
       name: name,

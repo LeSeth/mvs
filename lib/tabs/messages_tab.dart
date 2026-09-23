@@ -43,6 +43,7 @@ class MessagesTabState extends State<MessagesTab> {
   bool _searchLoading = false;
   RealtimeChannel? _messagesChannel;
   RealtimeChannel? _groupMessagesChannel;
+  RealtimeChannel? _groupMembershipsChannel;
 
   @override
   void initState() {
@@ -68,6 +69,16 @@ class MessagesTabState extends State<MessagesTab> {
         if (mounted && isMyGroup) _loadContacts();
       },
     );
+    // Dès que je suis ajouté à un NOUVEAU groupe, je suis notifié
+    // instantanément (au lieu d'attendre par hasard qu'un autre événement
+    // déclenche un rechargement de la liste).
+    _groupMembershipsChannel = GroupService.subscribeToMyGroupMemberships(
+      myPhone: widget.phoneNumber,
+      channelName: 'group_memberships_${widget.phoneNumber}',
+      onNewMembership: () {
+        if (mounted) _loadContacts();
+      },
+    );
   }
 
   @override
@@ -79,6 +90,9 @@ class MessagesTabState extends State<MessagesTab> {
     }
     if (_groupMessagesChannel != null) {
       GroupService.unsubscribe(_groupMessagesChannel!);
+    }
+    if (_groupMembershipsChannel != null) {
+      GroupService.unsubscribe(_groupMembershipsChannel!);
     }
     super.dispose();
   }
@@ -149,6 +163,7 @@ class MessagesTabState extends State<MessagesTab> {
     for (var group in groups) {
       final lastMessage = await GroupService.getLastGroupMessage(
         group['id'].toString(),
+        widget.phoneNumber,
       );
       groupsWithMessages.add({...group, 'last_message': lastMessage});
     }
