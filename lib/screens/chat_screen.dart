@@ -1,8 +1,11 @@
 import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+
 import '../services/message_service.dart';
 import '../services/contact_service.dart';
+import '../services/supabase_service.dart';
 
 class ChatScreen extends StatefulWidget {
   final String senderPhone;
@@ -25,24 +28,44 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final _messageController = TextEditingController();
   final _scrollController = ScrollController();
+
   List<Map<String, dynamic>> _messages = [];
+
   bool _isLoading = true;
+
   RealtimeChannel? _conversationChannel;
 
-  // Délai avant qu'un message lu ne disparaisse définitivement (des deux
-  // côtés + base de données), à partir du moment où IL a été affiché.
-  // Chaque message a son propre minuteur indépendant (et non un minuteur
-  // unique partagé), sinon un nouveau message reçu redémarrait le compte
-  // à rebours de TOUS les messages, et ils disparaissaient tous en même
-  // temps au lieu d'un vrai FIFO (le plus ancien en premier).
   static const Duration _disappearDelay = Duration(seconds: 20);
+
   final Map<dynamic, Timer> _messageTimers = {};
+
+  String? _receiverAvatarUrl;
 
   @override
   void initState() {
     super.initState();
+
     _loadMessages();
+    _loadReceiverAvatar();
     _subscribeToConversation();
+  }
+
+  Future<void> _loadReceiverAvatar() async {
+    try {
+      final user = await SupabaseService.client
+          .from('users')
+          .select('avatar_url')
+          .eq('phone_number', widget.receiverPhone)
+          .maybeSingle();
+
+      if (!mounted) return;
+
+      setState(() {
+        _receiverAvatarUrl = user?['avatar_url']?.toString();
+      });
+    } catch (e) {
+      debugPrint('Erreur récupération avatar conversation: $e');
+    }
   }
 
   void _subscribeToConversation() {
@@ -50,26 +73,26 @@ class _ChatScreenState extends State<ChatScreen> {
       myPhone: widget.senderPhone,
       otherPhone: widget.receiverPhone,
       onNewMessage: (message) {
-        // On ne traite que les messages venant de la personne avec qui
-        // on discute actuellement dans cet écran.
-        if (message['sender_phone'] != widget.receiverPhone) return;
+        if (message['sender_phone'] != widget.receiverPhone) {
+          return;
+        }
+
         if (!mounted) return;
 
         setState(() {
           _messages.add(message);
         });
+
         _scrollToBottom();
-        // Ce message précis vient d'être affiché -> il aura SON PROPRE
-        // délai de 20s, indépendant des autres.
         _scheduleMessageDeletion(message);
       },
       onMessagesDeleted: (ids) {
-        // L'autre personne vient de lire (et donc supprimer) des messages
-        // que je lui ai envoyés : ils doivent disparaître de mon écran aussi.
         if (!mounted) return;
+
         setState(() {
           _messages.removeWhere((m) => ids.contains(m['id']));
         });
+
         for (final id in ids) {
           _messageTimers.remove(id)?.cancel();
         }
@@ -79,13 +102,13 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOut,
-        );
-      }
+      if (!_scrollController.hasClients) return;
+
+      _scrollController.animateTo(
+        _scrollController.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOut,
+      );
     });
   }
 
@@ -93,13 +116,17 @@ class _ChatScreenState extends State<ChatScreen> {
   void dispose() {
     _messageController.dispose();
     _scrollController.dispose();
+
     for (final timer in _messageTimers.values) {
       timer.cancel();
     }
+
     _messageTimers.clear();
+
     if (_conversationChannel != null) {
       MessageService.unsubscribe(_conversationChannel!);
     }
+
     super.dispose();
   }
 
@@ -108,40 +135,40 @@ class _ChatScreenState extends State<ChatScreen> {
       userPhone1: widget.senderPhone,
       userPhone2: widget.receiverPhone,
     );
+
     if (mounted) {
       setState(() {
         _messages = messages;
         _isLoading = false;
       });
+
       _scrollToBottom();
     }
-    // On vient d'afficher la conversation : chaque message reçu (pas les
-    // miens) démarre SON PROPRE compte à rebours de 20s, indépendamment
-    // des autres -> FIFO respecté même si plusieurs messages étaient déjà
-    // en attente.
+
     for (final message in _messages) {
       _scheduleMessageDeletion(message);
     }
   }
 
-  // Démarre (une seule fois par message) le compte à rebours de 20s avant
-  // suppression définitive de CE message précis.
   void _scheduleMessageDeletion(Map<String, dynamic> message) {
     if (message['sender_phone'] != widget.receiverPhone) {
-      return; // je ne supprime pas mes propres messages tout seul
+      return;
     }
+
     final id = message['id'];
-    if (_messageTimers.containsKey(id)) return; // déjà programmé
+
+    if (_messageTimers.containsKey(id)) {
+      return;
+    }
 
     _messageTimers[id] = Timer(_disappearDelay, () => _deleteSingleMessage(id));
   }
 
-  // Supprime définitivement (base de données + écran local + écran de
-  // l'expéditeur s'il est ouvert) UN SEUL message précis.
   Future<void> _deleteSingleMessage(dynamic id) async {
     _messageTimers.remove(id);
 
     final deleted = await MessageService.deleteMessageById(id);
+
     if (!deleted) return;
 
     if (mounted) {
@@ -150,8 +177,6 @@ class _ChatScreenState extends State<ChatScreen> {
       });
     }
 
-    // Prévenir l'expéditeur en temps réel, si sa conversation est ouverte,
-    // pour que le message disparaisse aussi de son côté.
     if (_conversationChannel != null) {
       await MessageService.broadcastMessagesDeleted(
         channel: _conversationChannel!,
@@ -161,14 +186,14 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _sendMessage() async {
-    if (_messageController.text.trim().isEmpty) return;
+    if (_messageController.text.trim().isEmpty) {
+      return;
+    }
 
-    String content = _messageController.text.trim();
+    final content = _messageController.text.trim();
+
     _messageController.clear();
 
-    // S'assure que la conversation apparaîtra automatiquement dans la
-    // liste des messages des DEUX personnes (pas seulement chez moi),
-    // même si l'autre ne m'a jamais ajouté comme contact.
     await ContactService.ensureMutualContact(
       phoneA: widget.senderPhone,
       pseudoA: widget.senderPseudo,
@@ -189,16 +214,28 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        title: Row(
           children: [
-            Text(
-              widget.receiverPseudo,
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
-            const Text(
-              'En ligne',
-              style: TextStyle(fontSize: 12, color: Colors.green),
+            _buildHeaderAvatar(),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    widget.receiverPseudo,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const Text(
+                    'En ligne',
+                    style: TextStyle(fontSize: 12, color: Colors.green),
+                  ),
+                ],
+              ),
             ),
           ],
         ),
@@ -222,13 +259,14 @@ class _ChatScreenState extends State<ChatScreen> {
                       )
                     : ListView.builder(
                         controller: _scrollController,
-                        reverse: false,
-                        padding: const EdgeInsets.all(16),
+                        padding: const EdgeInsets.all(12),
                         itemCount: _messages.length,
                         itemBuilder: (context, index) {
                           final message = _messages[index];
-                          bool isMe =
+
+                          final isMe =
                               message['sender_phone'] == widget.senderPhone;
+
                           return _buildMessageBubble(message, isMe);
                         },
                       ),
@@ -241,52 +279,128 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  Widget _buildHeaderAvatar() {
+    return CircleAvatar(
+      radius: 24,
+      backgroundColor: const Color(0xFF2AABEE),
+      backgroundImage:
+          _receiverAvatarUrl != null && _receiverAvatarUrl!.isNotEmpty
+          ? NetworkImage(_receiverAvatarUrl!)
+          : null,
+      child: _receiverAvatarUrl == null || _receiverAvatarUrl!.isEmpty
+          ? Text(
+              widget.receiverPseudo.isNotEmpty
+                  ? widget.receiverPseudo[0].toUpperCase()
+                  : '?',
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            )
+          : null,
+    );
+  }
+
   Widget _buildMessageBubble(Map<String, dynamic> message, bool isMe) {
-    return Align(
-      alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 8),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-        decoration: BoxDecoration(
-          color: isMe ? const Color(0xFF2AABEE) : const Color(0xFF1F2C34),
-          borderRadius: BorderRadius.circular(16),
-        ),
-        constraints: BoxConstraints(
-          maxWidth: MediaQuery.of(context).size.width * 0.7,
-        ),
-        child: Column(
-          crossAxisAlignment: isMe
-              ? CrossAxisAlignment.end
-              : CrossAxisAlignment.start,
-          children: [
-            Text(
-              message['content'],
-              style: const TextStyle(color: Colors.white, fontSize: 16),
-            ),
-            const SizedBox(height: 4),
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  _formatTime(message['created_at']),
-                  style: TextStyle(
-                    color: Colors.white.withOpacity(0.7),
-                    fontSize: 11,
-                  ),
-                ),
-                if (isMe) ...[
-                  const SizedBox(width: 4),
-                  Icon(
-                    message['is_read'] == true ? Icons.done_all : Icons.done,
-                    size: 14,
-                    color: Colors.white.withOpacity(0.7),
-                  ),
-                ],
-              ],
-            ),
-          ],
-        ),
+    final bubble = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: isMe ? const Color(0xFF2AABEE) : const Color(0xFF1F2C34),
+        borderRadius: BorderRadius.circular(16),
       ),
+      constraints: BoxConstraints(
+        maxWidth: MediaQuery.of(context).size.width * 0.72,
+      ),
+      child: Column(
+        crossAxisAlignment: isMe
+            ? CrossAxisAlignment.end
+            : CrossAxisAlignment.start,
+        children: [
+          if (!isMe)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Text(
+                widget.receiverPseudo,
+                style: const TextStyle(
+                  color: Color(0xFF2AABEE),
+                  fontWeight: FontWeight.bold,
+                  fontSize: 13,
+                ),
+              ),
+            ),
+          Text(
+            message['content']?.toString() ?? '',
+            style: const TextStyle(color: Colors.white, fontSize: 16),
+          ),
+          const SizedBox(height: 4),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                _formatTime(message['created_at'].toString()),
+                style: TextStyle(
+                  color: Colors.white.withOpacity(0.7),
+                  fontSize: 11,
+                ),
+              ),
+              if (isMe) ...[
+                const SizedBox(width: 4),
+                Icon(
+                  message['is_read'] == true ? Icons.done_all : Icons.done,
+                  size: 14,
+                  color: Colors.white.withOpacity(0.7),
+                ),
+              ],
+            ],
+          ),
+        ],
+      ),
+    );
+
+    if (isMe) {
+      return Align(
+        alignment: Alignment.centerRight,
+        child: Container(
+          margin: const EdgeInsets.only(bottom: 8),
+          child: bubble,
+        ),
+      );
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          _buildReceiverMessageAvatar(),
+          const SizedBox(width: 8),
+          Flexible(child: bubble),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildReceiverMessageAvatar() {
+    return CircleAvatar(
+      radius: 24,
+      backgroundColor: Colors.white,
+      backgroundImage:
+          _receiverAvatarUrl != null && _receiverAvatarUrl!.isNotEmpty
+          ? NetworkImage(_receiverAvatarUrl!)
+          : null,
+      child: _receiverAvatarUrl == null || _receiverAvatarUrl!.isEmpty
+          ? Text(
+              widget.receiverPseudo.isNotEmpty
+                  ? widget.receiverPseudo[0].toUpperCase()
+                  : '?',
+              style: const TextStyle(
+                color: Color(0xFF2AABEE),
+                fontWeight: FontWeight.bold,
+                fontSize: 18,
+              ),
+            )
+          : null,
     );
   }
 
@@ -331,9 +445,12 @@ class _ChatScreenState extends State<ChatScreen> {
     final now = DateTime.now();
 
     if (dt.day == now.day && dt.month == now.month && dt.year == now.year) {
-      return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
-    } else {
-      return '${dt.day}/${dt.month} ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+      return '${dt.hour.toString().padLeft(2, '0')}:'
+          '${dt.minute.toString().padLeft(2, '0')}';
     }
+
+    return '${dt.day}/${dt.month} '
+        '${dt.hour.toString().padLeft(2, '0')}:'
+        '${dt.minute.toString().padLeft(2, '0')}';
   }
 }

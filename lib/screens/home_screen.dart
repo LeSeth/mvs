@@ -118,7 +118,7 @@ class _HomeScreenState extends State<HomeScreen>
           ),
           const VideosTab(),
           const StatutsTab(),
-          ParametresTab(phoneNumber: widget.phoneNumber, pseudo: widget.pseudo),
+          ParametresTab(pseudo: widget.pseudo, userId: widget.userId),
         ],
       ),
       floatingActionButton: _tabController.index == 0

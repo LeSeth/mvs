@@ -266,10 +266,157 @@ class GroupService {
   //  - les nouveaux messages (onInsert)
   //  - les suppressions de messages "lus par tous" (onMessagesDeleted),
   //    diffusées via un broadcast (pas besoin de config DB supplémentaire).
+  // Récupère les informations d'un groupe précis.
+  static Future<Map<String, dynamic>?> getGroup(String groupId) async {
+    try {
+      final group = await _client
+          .from('groups')
+          .select()
+          .eq('id', groupId)
+          .maybeSingle();
+      return group;
+    } catch (e) {
+      print('Erreur récupération groupe: $e');
+      return null;
+    }
+  }
+
+  // Seul le créateur du groupe peut modifier son nom.
+  static Future<bool> updateGroupName({
+    required String groupId,
+    required String requesterPhone,
+    required String newName,
+    RealtimeChannel? channel,
+  }) async {
+    try {
+      final name = newName.trim();
+      if (name.isEmpty) return false;
+
+      final group = await getGroup(groupId);
+      if (group == null || group['created_by'] != requesterPhone) {
+        return false;
+      }
+
+      await _client.from('groups').update({'name': name}).eq('id', groupId);
+
+      if (channel != null) {
+        await channel.sendBroadcastMessage(
+          event: 'group_updated',
+          payload: {'name': name},
+        );
+      }
+      return true;
+    } catch (e) {
+      print('Erreur modification nom groupe: $e');
+      return false;
+    }
+  }
+
+  // Seul le créateur peut supprimer le groupe.
+  static Future<bool> deleteGroup({
+    required String groupId,
+    required String requesterPhone,
+    RealtimeChannel? channel,
+  }) async {
+    try {
+      final group = await getGroup(groupId);
+      if (group == null || group['created_by'] != requesterPhone) {
+        return false;
+      }
+
+      final messages = await _client
+          .from('group_messages')
+          .select('id')
+          .eq('group_id', groupId);
+      final messageIds = messages.map((m) => m['id']).toList();
+
+      if (messageIds.isNotEmpty) {
+        await _client
+            .from('group_message_reads')
+            .delete()
+            .inFilter('message_id', messageIds);
+        await _client.from('group_messages').delete().eq('group_id', groupId);
+      }
+
+      await _client.from('group_members').delete().eq('group_id', groupId);
+      await _client.from('groups').delete().eq('id', groupId);
+
+      if (channel != null) {
+        await channel.sendBroadcastMessage(
+          event: 'group_deleted',
+          payload: {'group_id': groupId},
+        );
+      }
+      return true;
+    } catch (e) {
+      print('Erreur suppression groupe: $e');
+      return false;
+    }
+  }
+
+  // Seul le créateur peut retirer un autre membre.
+  static Future<bool> removeMember({
+    required String groupId,
+    required String requesterPhone,
+    required String memberPhone,
+    RealtimeChannel? channel,
+  }) async {
+    try {
+      if (requesterPhone == memberPhone) return false;
+
+      final group = await getGroup(groupId);
+      if (group == null || group['created_by'] != requesterPhone) {
+        return false;
+      }
+
+      final member = await _client
+          .from('group_members')
+          .select('member_phone')
+          .eq('group_id', groupId)
+          .eq('member_phone', memberPhone)
+          .maybeSingle();
+      if (member == null) return false;
+
+      final messages = await _client
+          .from('group_messages')
+          .select('id')
+          .eq('group_id', groupId);
+      final messageIds = messages.map((m) => m['id']).toList();
+
+      if (messageIds.isNotEmpty) {
+        await _client
+            .from('group_message_reads')
+            .delete()
+            .eq('member_phone', memberPhone)
+            .inFilter('message_id', messageIds);
+      }
+
+      await _client
+          .from('group_members')
+          .delete()
+          .eq('group_id', groupId)
+          .eq('member_phone', memberPhone);
+
+      if (channel != null) {
+        await channel.sendBroadcastMessage(
+          event: 'group_member_removed',
+          payload: {'member_phone': memberPhone},
+        );
+      }
+      return true;
+    } catch (e) {
+      print('Erreur suppression membre: $e');
+      return false;
+    }
+  }
+
   static RealtimeChannel subscribeToGroupMessages({
     required String groupId,
     required void Function(Map<String, dynamic> message) onInsert,
     required void Function(List<dynamic> deletedIds) onMessagesDeleted,
+    void Function(String name)? onGroupUpdated,
+    void Function()? onGroupDeleted,
+    void Function(String memberPhone)? onMemberRemoved,
   }) {
     final channel = _client.channel('group_$groupId');
 
@@ -290,6 +437,26 @@ class GroupService {
           callback: (payload) {
             final ids = payload['ids'] as List<dynamic>? ?? [];
             onMessagesDeleted(ids);
+          },
+        )
+        .onBroadcast(
+          event: 'group_updated',
+          callback: (payload) {
+            final name = payload['name']?.toString();
+            if (name != null && name.isNotEmpty) onGroupUpdated?.call(name);
+          },
+        )
+        .onBroadcast(
+          event: 'group_deleted',
+          callback: (_) => onGroupDeleted?.call(),
+        )
+        .onBroadcast(
+          event: 'group_member_removed',
+          callback: (payload) {
+            final phone = payload['member_phone']?.toString();
+            if (phone != null && phone.isNotEmpty) {
+              onMemberRemoved?.call(phone);
+            }
           },
         )
         .subscribe();
