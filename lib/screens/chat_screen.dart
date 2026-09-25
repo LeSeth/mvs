@@ -3,8 +3,9 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-import '../services/message_service.dart';
+import '../services/audio_service.dart';
 import '../services/contact_service.dart';
+import '../services/message_service.dart';
 import '../services/supabase_service.dart';
 
 class ChatScreen extends StatefulWidget {
@@ -32,6 +33,8 @@ class _ChatScreenState extends State<ChatScreen> {
   List<Map<String, dynamic>> _messages = [];
 
   bool _isLoading = true;
+  bool _isRecording = false;
+  bool _isUploadingAudio = false;
 
   RealtimeChannel? _conversationChannel;
 
@@ -185,7 +188,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  void _sendMessage() async {
+  Future<void> _sendMessage() async {
     if (_messageController.text.trim().isEmpty) {
       return;
     }
@@ -206,6 +209,95 @@ class _ChatScreenState extends State<ChatScreen> {
       receiverPhone: widget.receiverPhone,
       content: content,
     );
+
+    await _loadMessages();
+  }
+
+  Future<void> _toggleRecording() async {
+    if (_isUploadingAudio) {
+      return;
+    }
+
+    if (!_isRecording) {
+      final path = await AudioService.startRecording();
+
+      if (path == null) {
+        if (!mounted) return;
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Autorisation du microphone nécessaire.'),
+          ),
+        );
+
+        return;
+      }
+
+      if (!mounted) return;
+
+      setState(() {
+        _isRecording = true;
+      });
+
+      return;
+    }
+
+    if (!mounted) return;
+
+    setState(() {
+      _isRecording = false;
+      _isUploadingAudio = true;
+    });
+
+    final path = await AudioService.stopRecording();
+
+    if (path == null) {
+      if (!mounted) return;
+
+      setState(() {
+        _isUploadingAudio = false;
+      });
+
+      return;
+    }
+
+    final audioUrl = await AudioService.uploadAudio(
+      localPath: path,
+      folder: 'private',
+    );
+
+    if (audioUrl == null) {
+      if (!mounted) return;
+
+      setState(() {
+        _isUploadingAudio = false;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Impossible d’envoyer le message vocal.')),
+      );
+
+      return;
+    }
+
+    await ContactService.ensureMutualContact(
+      phoneA: widget.senderPhone,
+      pseudoA: widget.senderPseudo,
+      phoneB: widget.receiverPhone,
+      pseudoB: widget.receiverPseudo,
+    );
+
+    await MessageService.sendVoiceMessage(
+      senderPhone: widget.senderPhone,
+      receiverPhone: widget.receiverPhone,
+      audioUrl: audioUrl,
+    );
+
+    if (!mounted) return;
+
+    setState(() {
+      _isUploadingAudio = false;
+    });
 
     await _loadMessages();
   }
@@ -303,6 +395,10 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _buildMessageBubble(Map<String, dynamic> message, bool isMe) {
+    final messageType = message['message_type']?.toString() ?? 'text';
+
+    final isAudio = messageType == 'audio';
+
     final bubble = Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       decoration: BoxDecoration(
@@ -329,10 +425,13 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
               ),
             ),
-          Text(
-            message['content']?.toString() ?? '',
-            style: const TextStyle(color: Colors.white, fontSize: 16),
-          ),
+          if (isAudio)
+            _buildAudioMessage(message)
+          else
+            Text(
+              message['content']?.toString() ?? '',
+              style: const TextStyle(color: Colors.white, fontSize: 16),
+            ),
           const SizedBox(height: 4),
           Row(
             mainAxisSize: MainAxisSize.min,
@@ -381,6 +480,26 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  Widget _buildAudioMessage(Map<String, dynamic> message) {
+    final audioUrl = message['media_url']?.toString();
+
+    if (audioUrl == null || audioUrl.isEmpty) {
+      return const Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.mic_off, color: Colors.white),
+          SizedBox(width: 8),
+          Text('Audio indisponible', style: TextStyle(color: Colors.white)),
+        ],
+      );
+    }
+
+    return VoiceMessagePlayer(
+      audioUrl: audioUrl,
+      isMe: message['sender_phone'] == widget.senderPhone,
+    );
+  }
+
   Widget _buildReceiverMessageAvatar() {
     return CircleAvatar(
       radius: 24,
@@ -405,6 +524,61 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _buildMessageInput() {
+    if (_isRecording) {
+      return Container(
+        padding: const EdgeInsets.all(8),
+        color: const Color(0xFF1F2C34),
+        child: Row(
+          children: [
+            const Expanded(
+              child: Row(
+                children: [
+                  Icon(Icons.mic, color: Colors.red),
+                  SizedBox(width: 10),
+                  Text(
+                    'Enregistrement...',
+                    style: TextStyle(color: Colors.white, fontSize: 16),
+                  ),
+                ],
+              ),
+            ),
+            CircleAvatar(
+              backgroundColor: Colors.red,
+              child: IconButton(
+                icon: const Icon(Icons.stop, color: Colors.white),
+                onPressed: _toggleRecording,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (_isUploadingAudio) {
+      return Container(
+        padding: const EdgeInsets.all(12),
+        color: const Color(0xFF1F2C34),
+        child: const Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: Color(0xFF2AABEE),
+              ),
+            ),
+            SizedBox(width: 10),
+            Text(
+              'Envoi du message vocal...',
+              style: TextStyle(color: Colors.white),
+            ),
+          ],
+        ),
+      );
+    }
+
     return Container(
       padding: const EdgeInsets.all(8),
       color: const Color(0xFF1F2C34),
@@ -424,6 +598,10 @@ class _ChatScreenState extends State<ChatScreen> {
                   borderSide: BorderSide.none,
                 ),
                 contentPadding: const EdgeInsets.symmetric(horizontal: 20),
+                suffixIcon: IconButton(
+                  icon: const Icon(Icons.mic, color: Color(0xFF2AABEE)),
+                  onPressed: _toggleRecording,
+                ),
               ),
             ),
           ),

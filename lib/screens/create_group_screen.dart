@@ -22,8 +22,11 @@ class CreateGroupScreen extends StatefulWidget {
 
 class _CreateGroupScreenState extends State<CreateGroupScreen> {
   final TextEditingController _nameController = TextEditingController();
+
   List<Map<String, dynamic>> _contacts = [];
-  final Set<String> _selectedPhones = {}; // contact_phone_hash sélectionnés
+
+  final Set<String> _selectedPhones = {};
+
   bool _isLoading = true;
   bool _isCreating = false;
 
@@ -41,6 +44,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
 
   Future<void> _loadContacts() async {
     final contacts = await ContactService.getContacts(widget.phoneNumber);
+
     if (mounted) {
       setState(() {
         _contacts = contacts;
@@ -66,6 +70,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
       _showSnack('Donnez un nom à votre groupe');
       return;
     }
+
     if (_selectedPhones.isEmpty) {
       _showSnack(
         'Un groupe nécessite au moins 2 personnes : sélectionnez au moins 1 contact',
@@ -75,57 +80,68 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
 
     setState(() => _isCreating = true);
 
-    final selectedContacts = _contacts
-        .where((c) => _selectedPhones.contains(c['contact_phone_hash']))
-        .toList();
+    try {
+      final selectedContacts = _contacts
+          .where((c) => _selectedPhones.contains(c['contact_phone_hash']))
+          .toList();
 
-    // La table "contacts" ne stocke que le HASH du numéro, pas le vrai
-    // numéro : il faut le résoudre via la table users pour chaque membre,
-    // sinon leur ligne group_members serait créée avec le hash comme
-    // member_phone, et ils ne retrouveraient jamais le groupe (puisque
-    // getUserGroups filtre par le vrai numéro de téléphone).
-    final hashes = selectedContacts
-        .map((c) => c['contact_phone_hash'].toString())
-        .toList();
-    final resolvedUsers = await SupabaseService.findUsersByPhoneHashes(hashes);
+      final hashes = selectedContacts
+          .map((c) => c['contact_phone_hash'].toString())
+          .toList();
 
-    final members = selectedContacts.map((c) {
-      final match = resolvedUsers.firstWhere(
-        (u) => u['phone_hash'] == c['contact_phone_hash'],
-        orElse: () => <String, dynamic>{},
+      final resolvedUsers = await SupabaseService.findUsersByPhoneHashes(
+        hashes,
       );
-      return {
-        'phone': (match['phone_number'] ?? c['contact_phone_hash']).toString(),
-        'pseudo': c['contact_pseudo'].toString(),
-      };
-    }).toList();
 
-    final group = await GroupService.createGroup(
-      name: name,
-      creatorPhone: widget.phoneNumber,
-      creatorPseudo: widget.pseudo,
-      members: members,
-    );
+      final members = selectedContacts.map((c) {
+        final match = resolvedUsers.firstWhere(
+          (u) => u['phone_hash'] == c['contact_phone_hash'],
+          orElse: () => <String, dynamic>{},
+        );
 
-    if (!mounted) return;
-    setState(() => _isCreating = false);
+        return {
+          'phone_number': (match['phone_number'] ?? c['contact_phone_hash'])
+              .toString(),
+          'pseudo': c['contact_pseudo'].toString(),
+        };
+      }).toList();
 
-    if (group == null) {
-      _showSnack('Impossible de créer le groupe. Vérifiez votre connexion.');
-      return;
-    }
+      final groupId = await GroupService.createGroup(
+        name: name,
+        creatorPhone: widget.phoneNumber,
+        creatorPseudo: widget.pseudo,
+        members: members,
+      );
 
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(
-        builder: (context) => GroupChatScreen(
-          groupId: group['id'].toString(),
-          groupName: group['name'],
-          myPhone: widget.phoneNumber,
-          myPseudo: widget.pseudo,
+      if (!mounted) return;
+
+      setState(() => _isCreating = false);
+
+      if (groupId == null) {
+        _showSnack('Impossible de créer le groupe. Vérifiez votre connexion.');
+        return;
+      }
+
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (context) => GroupChatScreen(
+            groupId: groupId,
+            groupName: name,
+            myPhone: widget.phoneNumber,
+            myPseudo: widget.pseudo,
+          ),
         ),
-      ),
-    );
+      );
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() => _isCreating = false);
+
+      _showSnack('Erreur lors de la création du groupe.');
+
+      print('Erreur création groupe: $e');
+    }
   }
 
   void _showSnack(String message) {
@@ -181,18 +197,22 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
               ),
             ),
           ),
+
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: Align(
               alignment: Alignment.centerLeft,
               child: Text(
-                '${_selectedPhones.length} sélectionné${_selectedPhones.length > 1 ? "s" : ""} '
+                '${_selectedPhones.length} sélectionné'
+                '${_selectedPhones.length > 1 ? "s" : ""} '
                 '(minimum 1, pour un groupe de 2 personnes)',
                 style: TextStyle(color: Colors.grey[500], fontSize: 12),
               ),
             ),
           ),
+
           const SizedBox(height: 8),
+
           Expanded(
             child: _isLoading
                 ? const Center(
@@ -201,7 +221,9 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
                 : _contacts.isEmpty
                 ? Center(
                     child: Text(
-                      'Aucun contact disponible.\nSynchronisez vos contacts depuis l\'onglet Messages.',
+                      'Aucun contact disponible.\n'
+                      'Synchronisez vos contacts depuis '
+                      'l\'onglet Messages.',
                       textAlign: TextAlign.center,
                       style: TextStyle(color: Colors.grey[500]),
                     ),
@@ -210,14 +232,19 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
                     itemCount: _contacts.length,
                     itemBuilder: (context, index) {
                       final contact = _contacts[index];
-                      final hash = contact['contact_phone_hash'];
+
+                      final hash = contact['contact_phone_hash'].toString();
+
                       final pseudo =
                           (contact['contact_pseudo'] as String?) ?? '';
+
                       final isSelected = _selectedPhones.contains(hash);
 
                       return CheckboxListTile(
                         value: isSelected,
-                        onChanged: (_) => _toggleSelection(hash),
+                        onChanged: (_) {
+                          _toggleSelection(hash);
+                        },
                         activeColor: const Color(0xFF2AABEE),
                         secondary: CircleAvatar(
                           backgroundColor: const Color(0xFF2AABEE),

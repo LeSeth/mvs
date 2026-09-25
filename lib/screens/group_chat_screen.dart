@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../services/audio_service.dart';
 import '../services/group_service.dart';
 import '../services/supabase_service.dart';
 
@@ -32,17 +33,16 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   List<Map<String, dynamic>> _members = [];
 
   bool _isLoading = true;
+  bool _isRecording = false;
+  bool _isUploadingAudio = false;
 
   RealtimeChannel? _channel;
 
   static const Duration _disappearDelay = Duration(seconds: 20);
+
   final Map<dynamic, Timer> _messageTimers = {};
 
   late final String _myHash = SupabaseService.hashPhoneNumber(widget.myPhone);
-
-  // Avatar des membres.
-  final Map<String, String?> _avatarsByHash = {};
-  final Map<String, String?> _avatarsByPseudo = {};
 
   @override
   void initState() {
@@ -50,56 +50,20 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
     _loadMembers();
     _loadMessages();
-    _loadAvatars();
     _subscribe();
   }
 
   Future<void> _loadMembers() async {
-    final members = await GroupService.getGroupMembers(widget.groupId);
-
-    if (mounted) {
-      setState(() {
-        _members = members;
-      });
-    }
-  }
-
-  Future<void> _loadAvatars() async {
     try {
-      final users = await SupabaseService.client
-          .from('users')
-          .select('phone_hash, pseudo, avatar_url');
+      final members = await GroupService.getGroupMembers(widget.groupId);
 
       if (!mounted) return;
 
-      final Map<String, String?> byHash = {};
-      final Map<String, String?> byPseudo = {};
-
-      for (final user in users) {
-        final hash = user['phone_hash']?.toString();
-        final pseudo = user['pseudo']?.toString();
-        final avatar = user['avatar_url']?.toString();
-
-        if (hash != null && hash.isNotEmpty) {
-          byHash[hash] = avatar;
-        }
-
-        if (pseudo != null && pseudo.isNotEmpty) {
-          byPseudo[pseudo] = avatar;
-        }
-      }
-
       setState(() {
-        _avatarsByHash
-          ..clear()
-          ..addAll(byHash);
-
-        _avatarsByPseudo
-          ..clear()
-          ..addAll(byPseudo);
+        _members = members;
       });
     } catch (e) {
-      debugPrint('Erreur récupération avatars groupe: $e');
+      debugPrint('Erreur chargement membres: $e');
     }
   }
 
@@ -129,6 +93,14 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       onInsert: (message) {
         if (!mounted) return;
 
+        final existingIndex = _messages.indexWhere(
+          (item) => item['id'] == message['id'],
+        );
+
+        if (existingIndex != -1) {
+          return;
+        }
+
         setState(() {
           _messages.add(message);
         });
@@ -136,11 +108,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         _scrollToBottom();
         _scheduleMessageRead(message);
       },
-      onMessagesDeleted: (ids) {
+      onDelete: (ids) {
         if (!mounted) return;
 
         setState(() {
-          _messages.removeWhere((m) => ids.contains(m['id']));
+          _messages.removeWhere((message) => ids.contains(message['id']));
         });
 
         for (final id in ids) {
@@ -150,8 +122,22 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     );
   }
 
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scrollController.hasClients) return;
+
+      _scrollController.animateTo(
+        _scrollController.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOut,
+      );
+    });
+  }
+
   void _scheduleMessageRead(Map<String, dynamic> message) {
-    if (message['sender_phone'] == _myHash) {
+    final senderPhone = message['sender_phone']?.toString();
+
+    if (senderPhone == _myHash) {
       return;
     }
 
@@ -170,29 +156,117 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   Future<void> _markSingleMessageRead(dynamic id) async {
     _messageTimers.remove(id);
 
+    final success = await GroupService.markMessageRead(
+      messageId: id,
+      phoneNumber: widget.myPhone,
+    );
+
+    if (!success) return;
+
     if (mounted) {
       setState(() {
-        _messages.removeWhere((m) => m['id'] == id);
+        _messages.removeWhere((message) => message['id'] == id);
       });
     }
-
-    await GroupService.markMessageRead(
-      messageId: id,
-      groupId: widget.groupId,
-      memberPhone: widget.myPhone,
-      channel: _channel,
-    );
   }
 
-  void _scrollToBottom() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_scrollController.hasClients) return;
+  Future<void> _sendMessage() async {
+    if (_messageController.text.trim().isEmpty) {
+      return;
+    }
 
-      _scrollController.animateTo(
-        _scrollController.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeOut,
+    final content = _messageController.text.trim();
+
+    _messageController.clear();
+
+    await GroupService.sendGroupMessage(
+      groupId: widget.groupId,
+      senderPhone: widget.myPhone,
+      senderPseudo: widget.myPseudo,
+      content: content,
+    );
+
+    await _loadMessages();
+  }
+
+  Future<void> _toggleRecording() async {
+    if (_isUploadingAudio) {
+      return;
+    }
+
+    if (!_isRecording) {
+      final path = await AudioService.startRecording();
+
+      if (path == null) {
+        if (!mounted) return;
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Autorisation du microphone nécessaire.'),
+          ),
+        );
+
+        return;
+      }
+
+      if (!mounted) return;
+
+      setState(() {
+        _isRecording = true;
+      });
+
+      return;
+    }
+
+    if (!mounted) return;
+
+    setState(() {
+      _isRecording = false;
+      _isUploadingAudio = true;
+    });
+
+    final path = await AudioService.stopRecording();
+
+    if (path == null) {
+      if (!mounted) return;
+
+      setState(() {
+        _isUploadingAudio = false;
+      });
+
+      return;
+    }
+
+    final audioUrl = await AudioService.uploadAudio(
+      localPath: path,
+      folder: 'groups',
+    );
+
+    if (audioUrl == null) {
+      if (!mounted) return;
+
+      setState(() {
+        _isUploadingAudio = false;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Impossible d’envoyer le message vocal.')),
       );
+
+      return;
+    }
+
+    await GroupService.sendVoiceMessage(
+      groupId: widget.groupId,
+      senderPhone: widget.myPhone,
+      senderPseudo: widget.myPseudo,
+      audioUrl: audioUrl,
+    );
+
+    if (!mounted) return;
+
+    setState(() {
+      _isUploadingAudio = false;
     });
   }
 
@@ -214,21 +288,6 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     super.dispose();
   }
 
-  void _sendMessage() async {
-    if (_messageController.text.trim().isEmpty) return;
-
-    final content = _messageController.text.trim();
-
-    _messageController.clear();
-
-    await GroupService.sendGroupMessage(
-      groupId: widget.groupId,
-      senderPhone: widget.myPhone,
-      senderPseudo: widget.myPseudo,
-      content: content,
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -238,24 +297,15 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
           children: [
             Text(
               widget.groupName,
+              overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
             ),
             Text(
-              '${_members.length} membre${_members.length > 1 ? "s" : ""}',
-              style: const TextStyle(fontSize: 12, color: Colors.grey),
+              '${_members.length} membre${_members.length > 1 ? 's' : ''}',
+              style: const TextStyle(fontSize: 12, color: Colors.white70),
             ),
           ],
         ),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () => Navigator.pop(context),
-        ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.info_outline),
-            onPressed: _showMembersSheet,
-          ),
-        ],
       ),
       body: Column(
         children: [
@@ -292,11 +342,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   }
 
   Widget _buildMessageBubble(Map<String, dynamic> message, bool isMe) {
-    final senderPseudo = message['sender_pseudo']?.toString() ?? '';
+    final messageType = message['message_type']?.toString() ?? 'text';
 
-    final senderHash = message['sender_phone']?.toString();
+    final isAudio = messageType == 'audio';
 
-    final avatarUrl = senderHash != null ? _avatarsByHash[senderHash] : null;
+    final senderPseudo = message['sender_pseudo']?.toString() ?? 'Utilisateur';
 
     final bubble = Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
@@ -308,7 +358,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         maxWidth: MediaQuery.of(context).size.width * 0.72,
       ),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: isMe
+            ? CrossAxisAlignment.end
+            : CrossAxisAlignment.start,
         children: [
           if (!isMe)
             Padding(
@@ -322,10 +374,13 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                 ),
               ),
             ),
-          Text(
-            message['content']?.toString() ?? '',
-            style: const TextStyle(color: Colors.white, fontSize: 16),
-          ),
+          if (isAudio)
+            _buildAudioMessage(message)
+          else
+            Text(
+              message['content']?.toString() ?? '',
+              style: const TextStyle(color: Colors.white, fontSize: 16),
+            ),
           const SizedBox(height: 4),
           Text(
             _formatTime(message['created_at'].toString()),
@@ -338,53 +393,116 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       ),
     );
 
-    if (isMe) {
-      return Align(
-        alignment: Alignment.centerRight,
-        child: Container(
-          margin: const EdgeInsets.only(bottom: 8),
-          child: bubble,
+    return Align(
+      alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            if (!isMe) ...[
+              _buildMemberAvatar(senderPseudo),
+              const SizedBox(width: 8),
+            ],
+            Flexible(child: bubble),
+          ],
         ),
-      );
-    }
-
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          _buildSmallAvatar(avatarUrl: avatarUrl, pseudo: senderPseudo),
-          const SizedBox(width: 8),
-          Flexible(child: bubble),
-        ],
       ),
     );
   }
 
-  Widget _buildSmallAvatar({
-    required String? avatarUrl,
-    required String pseudo,
-  }) {
+  Widget _buildAudioMessage(Map<String, dynamic> message) {
+    final audioUrl = message['media_url']?.toString();
+
+    if (audioUrl == null || audioUrl.isEmpty) {
+      return const Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.mic_off, color: Colors.white),
+          SizedBox(width: 8),
+          Text('Audio indisponible', style: TextStyle(color: Colors.white)),
+        ],
+      );
+    }
+
+    return VoiceMessagePlayer(
+      audioUrl: audioUrl,
+      isMe: message['sender_phone'] == _myHash,
+    );
+  }
+
+  Widget _buildMemberAvatar(String pseudo) {
     return CircleAvatar(
-      radius: 24,
+      radius: 22,
       backgroundColor: Colors.white,
-      backgroundImage: avatarUrl != null && avatarUrl.isNotEmpty
-          ? NetworkImage(avatarUrl)
-          : null,
-      child: avatarUrl == null || avatarUrl.isEmpty
-          ? Text(
-              pseudo.isNotEmpty ? pseudo[0].toUpperCase() : '?',
-              style: const TextStyle(
-                color: Color(0xFF2AABEE),
-                fontWeight: FontWeight.bold,
-                fontSize: 18,
-              ),
-            )
-          : null,
+      child: Text(
+        pseudo.isNotEmpty ? pseudo[0].toUpperCase() : '?',
+        style: const TextStyle(
+          color: Color(0xFF2AABEE),
+          fontWeight: FontWeight.bold,
+          fontSize: 17,
+        ),
+      ),
     );
   }
 
   Widget _buildMessageInput() {
+    if (_isRecording) {
+      return Container(
+        padding: const EdgeInsets.all(8),
+        color: const Color(0xFF1F2C34),
+        child: Row(
+          children: [
+            const Expanded(
+              child: Row(
+                children: [
+                  Icon(Icons.mic, color: Colors.red),
+                  SizedBox(width: 10),
+                  Text(
+                    'Enregistrement...',
+                    style: TextStyle(color: Colors.white, fontSize: 16),
+                  ),
+                ],
+              ),
+            ),
+            CircleAvatar(
+              backgroundColor: Colors.red,
+              child: IconButton(
+                icon: const Icon(Icons.stop, color: Colors.white),
+                onPressed: _toggleRecording,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (_isUploadingAudio) {
+      return Container(
+        padding: const EdgeInsets.all(12),
+        color: const Color(0xFF1F2C34),
+        child: const Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: Color(0xFF2AABEE),
+              ),
+            ),
+            SizedBox(width: 10),
+            Text(
+              'Envoi du message vocal...',
+              style: TextStyle(color: Colors.white),
+            ),
+          ],
+        ),
+      );
+    }
+
     return Container(
       padding: const EdgeInsets.all(8),
       color: const Color(0xFF1F2C34),
@@ -404,6 +522,10 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                   borderSide: BorderSide.none,
                 ),
                 contentPadding: const EdgeInsets.symmetric(horizontal: 20),
+                suffixIcon: IconButton(
+                  icon: const Icon(Icons.mic, color: Color(0xFF2AABEE)),
+                  onPressed: _toggleRecording,
+                ),
               ),
             ),
           ),
@@ -416,48 +538,6 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
             ),
           ),
         ],
-      ),
-    );
-  }
-
-  void _showMembersSheet() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: const Color(0xFF1F2C34),
-      builder: (context) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text(
-                '${_members.length} membre${_members.length > 1 ? "s" : ""}',
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 16,
-                ),
-              ),
-            ),
-            ..._members.map((m) {
-              final pseudo = (m['member_pseudo'] as String?) ?? '';
-
-              final avatarUrl = _avatarsByPseudo[pseudo];
-
-              return ListTile(
-                leading: _buildSmallAvatar(
-                  avatarUrl: avatarUrl,
-                  pseudo: pseudo,
-                ),
-                title: Text(
-                  pseudo,
-                  style: const TextStyle(color: Colors.white),
-                ),
-              );
-            }),
-            const SizedBox(height: 12),
-          ],
-        ),
       ),
     );
   }
