@@ -1,0 +1,11 @@
+
+git remote remove origin
+git remote add origin https://github.com/LeSeth/mvs.git
+
+
+git push -u origin main
+
+
+git add .    
+git commit -m "Fix contacts plugin compatibility"
+git push origin main 
