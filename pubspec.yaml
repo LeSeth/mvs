@@ -21,6 +21,8 @@ dependencies:
   record: ^6.2.1
   audioplayers: ^6.7.1
   path_provider: ^2.1.5
+  file_picker: ^8.1.2
+  url_launcher: ^6.3.1
   #supabase_flutter: ^2.3.4
   #shared_preferences: ^2.2.2
   #package_info_plus: ^5.0.1

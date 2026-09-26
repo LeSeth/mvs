@@ -248,6 +248,7 @@ class SupabaseService {
   // l'expéditeur pour rester cohérent avec le reste du projet.
 
   static const String _voiceBucket = 'voice_messages';
+  static const String _attachmentsBucket = 'chat_attachments';
 
   static Future<String?> uploadVoiceMessage({
     required String senderPhone,
@@ -275,23 +276,89 @@ class SupabaseService {
     }
   }
 
-  // Best effort : supprime le fichier audio du storage quand le message
+  // =========================
+  // IMAGES ET FICHIERS
+  // =========================
+  // Même bucket "chat_attachments" pour les deux, rangés sous le numéro de
+  // l'expéditeur puis un sous-dossier "images/" ou "files/", pour n'avoir
+  // qu'un seul bucket Storage à créer côté Supabase.
+
+  static Future<String?> uploadChatImage({
+    required String senderPhone,
+    required Uint8List bytes,
+    required String extension,
+  }) async {
+    try {
+      final ext = extension.toLowerCase();
+      final path =
+          '$senderPhone/images/img_${DateTime.now().millisecondsSinceEpoch}.$ext';
+
+      await _client.storage
+          .from(_attachmentsBucket)
+          .uploadBinary(
+            path,
+            bytes,
+            fileOptions: FileOptions(
+              contentType: ext == 'png' ? 'image/png' : 'image/jpeg',
+              upsert: false,
+            ),
+          );
+
+      return _client.storage.from(_attachmentsBucket).getPublicUrl(path);
+    } catch (e) {
+      print('Erreur upload image: $e');
+      return null;
+    }
+  }
+
+  static Future<String?> uploadChatFile({
+    required String senderPhone,
+    required Uint8List bytes,
+    required String fileName,
+  }) async {
+    try {
+      final safeName = fileName.replaceAll(RegExp(r'[^\w.\-]'), '_');
+      final path =
+          '$senderPhone/files/${DateTime.now().millisecondsSinceEpoch}_$safeName';
+
+      await _client.storage
+          .from(_attachmentsBucket)
+          .uploadBinary(
+            path,
+            bytes,
+            fileOptions: const FileOptions(upsert: false),
+          );
+
+      return _client.storage.from(_attachmentsBucket).getPublicUrl(path);
+    } catch (e) {
+      print('Erreur upload fichier: $e');
+      return null;
+    }
+  }
+
+  // Best effort : supprime un fichier du storage quand le message
   // éphémère correspondant disparaît de la base (lu, ou groupe/membre
   // supprimé). N'importe quelle erreur ici (fichier déjà absent, réseau...)
   // est ignorée : le message en base est déjà supprimé, c'est ce qui
   // compte pour le caractère éphémère.
-  static Future<void> deleteVoiceMessage(String? audioUrl) async {
-    if (audioUrl == null || audioUrl.isEmpty) return;
+  static Future<void> _deleteFromBucket(String bucket, String? url) async {
+    if (url == null || url.isEmpty) return;
 
     try {
-      const marker = '/$_voiceBucket/';
-      final index = audioUrl.indexOf(marker);
+      final marker = '/$bucket/';
+      final index = url.indexOf(marker);
       if (index == -1) return;
 
-      final path = audioUrl.substring(index + marker.length);
-      await _client.storage.from(_voiceBucket).remove([path]);
+      final path = url.substring(index + marker.length);
+      await _client.storage.from(bucket).remove([path]);
     } catch (e) {
-      print('Erreur suppression fichier vocal: $e');
+      print('Erreur suppression fichier storage ($bucket): $e');
     }
   }
+
+  static Future<void> deleteVoiceMessage(String? audioUrl) =>
+      _deleteFromBucket(_voiceBucket, audioUrl);
+
+  static Future<void> deleteChatAttachment(String? url) =>
+      _deleteFromBucket(_attachmentsBucket, url);
 }

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -8,6 +9,9 @@ import '../services/group_service.dart';
 import '../services/supabase_service.dart';
 import '../widgets/voice_record_button.dart';
 import '../widgets/audio_message_bubble.dart';
+import '../widgets/attachment_picker_button.dart';
+import '../widgets/image_message_bubble.dart';
+import '../widgets/file_message_bubble.dart';
 
 class GroupChatScreen extends StatefulWidget {
   final String groupId;
@@ -272,6 +276,60 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     }
   }
 
+  Future<void> _sendImageMessage(Uint8List bytes, String extension) async {
+    final imageUrl = await SupabaseService.uploadChatImage(
+      senderPhone: widget.myPhone,
+      bytes: bytes,
+      extension: extension,
+    );
+
+    if (imageUrl == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Échec de l'envoi de l'image.")),
+        );
+      }
+      return;
+    }
+
+    await GroupService.sendGroupImageMessage(
+      groupId: widget.groupId,
+      senderPhone: widget.myPhone,
+      senderPseudo: widget.myPseudo,
+      imageUrl: imageUrl,
+    );
+  }
+
+  Future<void> _sendFileMessage(
+    Uint8List bytes,
+    String fileName,
+    int sizeBytes,
+  ) async {
+    final fileUrl = await SupabaseService.uploadChatFile(
+      senderPhone: widget.myPhone,
+      bytes: bytes,
+      fileName: fileName,
+    );
+
+    if (fileUrl == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Échec de l'envoi du fichier.")),
+        );
+      }
+      return;
+    }
+
+    await GroupService.sendGroupFileMessage(
+      groupId: widget.groupId,
+      senderPhone: widget.myPhone,
+      senderPseudo: widget.myPseudo,
+      fileUrl: fileUrl,
+      fileName: fileName,
+      fileSize: sizeBytes,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -371,6 +429,16 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
               audioUrl: message['audio_url'].toString(),
               durationMs: message['audio_duration_ms'] as int?,
             )
+          else if (message['message_type'] == 'image' &&
+              message['image_url'] != null)
+            ImageMessageBubble(imageUrl: message['image_url'].toString())
+          else if (message['message_type'] == 'file' &&
+              message['file_url'] != null)
+            FileMessageBubble(
+              fileUrl: message['file_url'].toString(),
+              fileName: message['file_name']?.toString() ?? 'Fichier',
+              fileSize: message['file_size'] as int?,
+            )
           else
             Text(
               message['content']?.toString() ?? '',
@@ -440,6 +508,10 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       color: const Color(0xFF1F2C34),
       child: Row(
         children: [
+          AttachmentPickerButton(
+            onImagePicked: _sendImageMessage,
+            onFilePicked: _sendFileMessage,
+          ),
           Expanded(
             child: TextField(
               controller: _messageController,

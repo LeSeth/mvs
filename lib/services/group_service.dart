@@ -158,6 +158,10 @@ class GroupService {
     String messageType = 'text',
     String? audioUrl,
     int? audioDurationMs,
+    String? imageUrl,
+    String? fileUrl,
+    String? fileName,
+    int? fileSize,
   }) async {
     try {
       await _client.from('group_messages').insert({
@@ -168,6 +172,10 @@ class GroupService {
         'message_type': messageType,
         'audio_url': audioUrl,
         'audio_duration_ms': audioDurationMs,
+        'image_url': imageUrl,
+        'file_url': fileUrl,
+        'file_name': fileName,
+        'file_size': fileSize,
       });
 
       await _client
@@ -199,6 +207,46 @@ class GroupService {
     );
   }
 
+  // Image de groupe : [imageUrl] pointe vers le fichier déjà uploadé dans
+  // le bucket Storage "chat_attachments".
+  static Future<void> sendGroupImageMessage({
+    required String groupId,
+    required String senderPhone,
+    required String senderPseudo,
+    required String imageUrl,
+  }) {
+    return sendGroupMessage(
+      groupId: groupId,
+      senderPhone: senderPhone,
+      senderPseudo: senderPseudo,
+      content: '📷 Photo',
+      messageType: 'image',
+      imageUrl: imageUrl,
+    );
+  }
+
+  // Fichier de groupe : [fileUrl] pointe vers le fichier déjà uploadé dans
+  // le bucket Storage "chat_attachments".
+  static Future<void> sendGroupFileMessage({
+    required String groupId,
+    required String senderPhone,
+    required String senderPseudo,
+    required String fileUrl,
+    required String fileName,
+    required int fileSize,
+  }) {
+    return sendGroupMessage(
+      groupId: groupId,
+      senderPhone: senderPhone,
+      senderPseudo: senderPseudo,
+      content: '📎 $fileName',
+      messageType: 'file',
+      fileUrl: fileUrl,
+      fileName: fileName,
+      fileSize: fileSize,
+    );
+  }
+
   static Future<bool> markMessageRead({
     required dynamic messageId,
     required String groupId,
@@ -216,7 +264,7 @@ class GroupService {
 
       final message = await _client
           .from('group_messages')
-          .select('sender_phone, audio_url')
+          .select('sender_phone, audio_url, image_url, file_url')
           .eq('id', messageId)
           .maybeSingle();
 
@@ -224,6 +272,8 @@ class GroupService {
 
       final senderPhoneHash = message['sender_phone'];
       final audioUrl = message['audio_url'] as String?;
+      final imageUrl = message['image_url'] as String?;
+      final fileUrl = message['file_url'] as String?;
 
       final members = await getGroupMembers(groupId);
       final requiredReaders = members
@@ -248,6 +298,8 @@ class GroupService {
         await _client.from('group_messages').delete().eq('id', messageId);
 
         unawaited(SupabaseService.deleteVoiceMessage(audioUrl));
+        unawaited(SupabaseService.deleteChatAttachment(imageUrl));
+        unawaited(SupabaseService.deleteChatAttachment(fileUrl));
 
         if (channel != null) {
           await channel.sendBroadcastMessage(
@@ -324,13 +376,17 @@ class GroupService {
 
       final messages = await _client
           .from('group_messages')
-          .select('id, audio_url')
+          .select('id, audio_url, image_url, file_url')
           .eq('group_id', groupId);
       final messageIds = messages.map((m) => m['id']).toList();
-      final audioUrls = messages
-          .map((m) => m['audio_url'] as String?)
-          .where((u) => u != null && u.isNotEmpty)
-          .toList();
+
+      final attachmentUrls = <(String bucket, String? url)>[
+        for (final m in messages) ...[
+          ('voice', m['audio_url'] as String?),
+          ('attachment', m['image_url'] as String?),
+          ('attachment', m['file_url'] as String?),
+        ],
+      ].where((e) => e.$2 != null && e.$2!.isNotEmpty).toList();
 
       if (messageIds.isNotEmpty) {
         await _client
@@ -340,8 +396,12 @@ class GroupService {
         await _client.from('group_messages').delete().eq('group_id', groupId);
       }
 
-      for (final url in audioUrls) {
-        unawaited(SupabaseService.deleteVoiceMessage(url));
+      for (final entry in attachmentUrls) {
+        if (entry.$1 == 'voice') {
+          unawaited(SupabaseService.deleteVoiceMessage(entry.$2));
+        } else {
+          unawaited(SupabaseService.deleteChatAttachment(entry.$2));
+        }
       }
 
       await _client.from('group_members').delete().eq('group_id', groupId);

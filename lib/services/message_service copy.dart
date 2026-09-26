@@ -11,10 +11,6 @@ class MessageService {
     String messageType = 'text',
     String? audioUrl,
     int? audioDurationMs,
-    String? imageUrl,
-    String? fileUrl,
-    String? fileName,
-    int? fileSize,
   }) async {
     try {
       await SupabaseService.client.from('messages').insert({
@@ -24,10 +20,6 @@ class MessageService {
         'message_type': messageType,
         'audio_url': audioUrl,
         'audio_duration_ms': audioDurationMs,
-        'image_url': imageUrl,
-        'file_url': fileUrl,
-        'file_name': fileName,
-        'file_size': fileSize,
         'is_read': false,
         'created_at': DateTime.now().toIso8601String(),
       });
@@ -53,42 +45,6 @@ class MessageService {
       messageType: 'audio',
       audioUrl: audioUrl,
       audioDurationMs: audioDurationMs,
-    );
-  }
-
-  // Image 1-à-1 : [imageUrl] pointe vers le fichier déjà uploadé dans le
-  // bucket Storage "chat_attachments" (voir SupabaseService).
-  static Future<bool> sendImageMessage({
-    required String senderPhone,
-    required String receiverPhone,
-    required String imageUrl,
-  }) {
-    return sendMessage(
-      senderPhone: senderPhone,
-      receiverPhone: receiverPhone,
-      content: '📷 Photo',
-      messageType: 'image',
-      imageUrl: imageUrl,
-    );
-  }
-
-  // Fichier 1-à-1 : [fileUrl] pointe vers le fichier déjà uploadé dans le
-  // bucket Storage "chat_attachments".
-  static Future<bool> sendFileMessage({
-    required String senderPhone,
-    required String receiverPhone,
-    required String fileUrl,
-    required String fileName,
-    required int fileSize,
-  }) {
-    return sendMessage(
-      senderPhone: senderPhone,
-      receiverPhone: receiverPhone,
-      content: '📎 $fileName',
-      messageType: 'file',
-      fileUrl: fileUrl,
-      fileName: fileName,
-      fileSize: fileSize,
     );
   }
 
@@ -123,19 +79,13 @@ class MessageService {
           .from('messages')
           .delete()
           .eq('id', id)
-          .select('id, audio_url, image_url, file_url');
+          .select('id, audio_url');
 
       if (deleted.isEmpty) return false;
 
-      // Nettoyage best effort des pièces jointes associées, s'il y en a.
-      final row = deleted.first;
-      final audioUrl = row['audio_url'] as String?;
-      final imageUrl = row['image_url'] as String?;
-      final fileUrl = row['file_url'] as String?;
-
+      // Nettoyage best effort du fichier vocal associé, s'il y en a un.
+      final audioUrl = deleted.first['audio_url'] as String?;
       unawaited(SupabaseService.deleteVoiceMessage(audioUrl));
-      unawaited(SupabaseService.deleteChatAttachment(imageUrl));
-      unawaited(SupabaseService.deleteChatAttachment(fileUrl));
 
       return true;
     } catch (e) {

@@ -1,17 +1,11 @@
+import 'dart:async';
+
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'supabase_service.dart';
 
-// Gère les groupes de discussion (à partir de 2 personnes : le créateur +
-// au moins 1 autre membre). Les messages de groupe disparaissent comme en
-// 1-à-1, mais par membre : chaque message disparaît individuellement de
-// l'écran d'un membre dès que CE membre l'a lu (+ 20s). Il n'est supprimé
-// de la base (et donc de chez TOUT LE MONDE, y compris l'expéditeur) que
-// lorsque TOUS les autres membres du groupe l'ont lu.
 class GroupService {
   static SupabaseClient get _client => SupabaseService.client;
 
-  // Crée un groupe et y ajoute le créateur + les membres choisis.
-  // [members] doit contenir au moins 1 personne (donc groupe de 2 min).
   static Future<Map<String, dynamic>?> createGroup({
     required String name,
     required String creatorPhone,
@@ -60,7 +54,6 @@ class GroupService {
     }
   }
 
-  // Groupes dont [userPhone] est membre, triés par dernier message.
   static Future<List<Map<String, dynamic>>> getUserGroups(
     String userPhone,
   ) async {
@@ -103,10 +96,6 @@ class GroupService {
     }
   }
 
-  // Messages du groupe visibles pour [memberPhone] : on exclut ceux que ce
-  // membre a déjà lus (même s'ils existent encore en base pour d'autres
-  // membres qui n'ont pas encore lu), sinon ils réapparaîtraient à tort en
-  // rouvrant la conversation.
   static Future<List<Map<String, dynamic>>> getGroupMessages(
     String groupId,
     String memberPhone,
@@ -149,7 +138,7 @@ class GroupService {
           .select()
           .eq('group_id', groupId)
           .order('created_at', ascending: false)
-          .limit(20); // marge pour retrouver le 1er non-lu par ce membre
+          .limit(20);
 
       final visible = List<Map<String, dynamic>>.from(
         messages,
@@ -166,13 +155,19 @@ class GroupService {
     required String senderPhone,
     required String senderPseudo,
     required String content,
+    String messageType = 'text',
+    String? audioUrl,
+    int? audioDurationMs,
   }) async {
     try {
       await _client.from('group_messages').insert({
         'group_id': groupId,
-        'sender_phone': senderPhone,
+        'sender_phone': SupabaseService.hashPhoneNumber(senderPhone),
         'sender_pseudo': senderPseudo,
         'content': content,
+        'message_type': messageType,
+        'audio_url': audioUrl,
+        'audio_duration_ms': audioDurationMs,
       });
 
       await _client
@@ -184,12 +179,26 @@ class GroupService {
     }
   }
 
-  // Enregistre que [memberPhone] a lu le message [messageId]. Si, après
-  // cette lecture, TOUS les autres membres du groupe (hors expéditeur)
-  // l'ont désormais lu, le message est supprimé définitivement de la base
-  // et un broadcast est envoyé pour qu'il disparaisse aussi de tout écran
-  // encore ouvert (y compris celui de l'expéditeur).
-  // Retourne true si le message a été supprimé de la base.
+  // Message vocal de groupe : [audioUrl] pointe vers le fichier déjà
+  // uploadé dans le bucket Storage "voice_messages".
+  static Future<void> sendGroupAudioMessage({
+    required String groupId,
+    required String senderPhone,
+    required String senderPseudo,
+    required String audioUrl,
+    required int audioDurationMs,
+  }) {
+    return sendGroupMessage(
+      groupId: groupId,
+      senderPhone: senderPhone,
+      senderPseudo: senderPseudo,
+      content: '🎤 Message vocal',
+      messageType: 'audio',
+      audioUrl: audioUrl,
+      audioDurationMs: audioDurationMs,
+    );
+  }
+
   static Future<bool> markMessageRead({
     required dynamic messageId,
     required String groupId,
@@ -197,7 +206,6 @@ class GroupService {
     RealtimeChannel? channel,
   }) async {
     try {
-      // Enregistrer la lecture (upsert : ignore si déjà lu par ce membre)
       await _client
           .from('group_message_reads')
           .upsert(
@@ -208,18 +216,22 @@ class GroupService {
 
       final message = await _client
           .from('group_messages')
-          .select('sender_phone')
+          .select('sender_phone, audio_url')
           .eq('id', messageId)
           .maybeSingle();
 
       if (message == null) return true; // déjà supprimé entre-temps
 
-      final senderPhone = message['sender_phone'];
+      final senderPhoneHash = message['sender_phone'];
+      final audioUrl = message['audio_url'] as String?;
 
       final members = await getGroupMembers(groupId);
       final requiredReaders = members
           .map((m) => m['member_phone'] as String)
-          .where((phone) => phone != senderPhone)
+          .where(
+            (phone) =>
+                SupabaseService.hashPhoneNumber(phone) != senderPhoneHash,
+          )
           .toSet();
 
       final reads = await _client
@@ -234,6 +246,8 @@ class GroupService {
 
       if (allRead) {
         await _client.from('group_messages').delete().eq('id', messageId);
+
+        unawaited(SupabaseService.deleteVoiceMessage(audioUrl));
 
         if (channel != null) {
           await channel.sendBroadcastMessage(
@@ -253,14 +267,161 @@ class GroupService {
     }
   }
 
-  // Écoute en temps réel, pour un groupe précis :
-  //  - les nouveaux messages (onInsert)
-  //  - les suppressions de messages "lus par tous" (onMessagesDeleted),
-  //    diffusées via un broadcast (pas besoin de config DB supplémentaire).
+  static Future<Map<String, dynamic>?> getGroup(String groupId) async {
+    try {
+      final group = await _client
+          .from('groups')
+          .select()
+          .eq('id', groupId)
+          .maybeSingle();
+      return group;
+    } catch (e) {
+      print('Erreur récupération groupe: $e');
+      return null;
+    }
+  }
+
+  static Future<bool> updateGroupName({
+    required String groupId,
+    required String requesterPhone,
+    required String newName,
+    RealtimeChannel? channel,
+  }) async {
+    try {
+      final name = newName.trim();
+      if (name.isEmpty) return false;
+
+      final group = await getGroup(groupId);
+      if (group == null || group['created_by'] != requesterPhone) {
+        return false;
+      }
+
+      await _client.from('groups').update({'name': name}).eq('id', groupId);
+
+      if (channel != null) {
+        await channel.sendBroadcastMessage(
+          event: 'group_updated',
+          payload: {'name': name},
+        );
+      }
+      return true;
+    } catch (e) {
+      print('Erreur modification nom groupe: $e');
+      return false;
+    }
+  }
+
+  static Future<bool> deleteGroup({
+    required String groupId,
+    required String requesterPhone,
+    RealtimeChannel? channel,
+  }) async {
+    try {
+      final group = await getGroup(groupId);
+      if (group == null || group['created_by'] != requesterPhone) {
+        return false;
+      }
+
+      final messages = await _client
+          .from('group_messages')
+          .select('id, audio_url')
+          .eq('group_id', groupId);
+      final messageIds = messages.map((m) => m['id']).toList();
+      final audioUrls = messages
+          .map((m) => m['audio_url'] as String?)
+          .where((u) => u != null && u.isNotEmpty)
+          .toList();
+
+      if (messageIds.isNotEmpty) {
+        await _client
+            .from('group_message_reads')
+            .delete()
+            .inFilter('message_id', messageIds);
+        await _client.from('group_messages').delete().eq('group_id', groupId);
+      }
+
+      for (final url in audioUrls) {
+        unawaited(SupabaseService.deleteVoiceMessage(url));
+      }
+
+      await _client.from('group_members').delete().eq('group_id', groupId);
+      await _client.from('groups').delete().eq('id', groupId);
+
+      if (channel != null) {
+        await channel.sendBroadcastMessage(
+          event: 'group_deleted',
+          payload: {'group_id': groupId},
+        );
+      }
+      return true;
+    } catch (e) {
+      print('Erreur suppression groupe: $e');
+      return false;
+    }
+  }
+
+  static Future<bool> removeMember({
+    required String groupId,
+    required String requesterPhone,
+    required String memberPhone,
+    RealtimeChannel? channel,
+  }) async {
+    try {
+      if (requesterPhone == memberPhone) return false;
+
+      final group = await getGroup(groupId);
+      if (group == null || group['created_by'] != requesterPhone) {
+        return false;
+      }
+
+      final member = await _client
+          .from('group_members')
+          .select('member_phone')
+          .eq('group_id', groupId)
+          .eq('member_phone', memberPhone)
+          .maybeSingle();
+      if (member == null) return false;
+
+      final messages = await _client
+          .from('group_messages')
+          .select('id')
+          .eq('group_id', groupId);
+      final messageIds = messages.map((m) => m['id']).toList();
+
+      if (messageIds.isNotEmpty) {
+        await _client
+            .from('group_message_reads')
+            .delete()
+            .eq('member_phone', memberPhone)
+            .inFilter('message_id', messageIds);
+      }
+
+      await _client
+          .from('group_members')
+          .delete()
+          .eq('group_id', groupId)
+          .eq('member_phone', memberPhone);
+
+      if (channel != null) {
+        await channel.sendBroadcastMessage(
+          event: 'group_member_removed',
+          payload: {'member_phone': memberPhone},
+        );
+      }
+      return true;
+    } catch (e) {
+      print('Erreur suppression membre: $e');
+      return false;
+    }
+  }
+
   static RealtimeChannel subscribeToGroupMessages({
     required String groupId,
     required void Function(Map<String, dynamic> message) onInsert,
     required void Function(List<dynamic> deletedIds) onMessagesDeleted,
+    void Function(String name)? onGroupUpdated,
+    void Function()? onGroupDeleted,
+    void Function(String memberPhone)? onMemberRemoved,
   }) {
     final channel = _client.channel('group_$groupId');
 
@@ -283,15 +444,31 @@ class GroupService {
             onMessagesDeleted(ids);
           },
         )
+        .onBroadcast(
+          event: 'group_updated',
+          callback: (payload) {
+            final name = payload['name']?.toString();
+            if (name != null && name.isNotEmpty) onGroupUpdated?.call(name);
+          },
+        )
+        .onBroadcast(
+          event: 'group_deleted',
+          callback: (_) => onGroupDeleted?.call(),
+        )
+        .onBroadcast(
+          event: 'group_member_removed',
+          callback: (payload) {
+            final phone = payload['member_phone']?.toString();
+            if (phone != null && phone.isNotEmpty) {
+              onMemberRemoved?.call(phone);
+            }
+          },
+        )
         .subscribe();
 
     return channel;
   }
 
-  // Écoute TOUS les nouveaux messages de groupe (pas de filtre possible sur
-  // "je suis membre de ce groupe" côté Postgres), et laisse l'appelant
-  // filtrer côté client selon ses groupes. Utilisé par la liste des
-  // conversations pour se rafraîchir automatiquement.
   static RealtimeChannel subscribeToAllGroupMessages({
     required String channelName,
     required void Function(Map<String, dynamic> message) onInsert,
@@ -303,6 +480,29 @@ class GroupService {
           schema: 'public',
           table: 'group_messages',
           callback: (payload) => onInsert(payload.newRecord),
+        )
+        .subscribe();
+
+    return channel;
+  }
+
+  static RealtimeChannel subscribeToMyGroupMemberships({
+    required String myPhone,
+    required void Function() onNewMembership,
+    required String channelName,
+  }) {
+    final channel = _client
+        .channel(channelName)
+        .onPostgresChanges(
+          event: PostgresChangeEvent.insert,
+          schema: 'public',
+          table: 'group_members',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'member_phone',
+            value: myPhone,
+          ),
+          callback: (payload) => onNewMembership(),
         )
         .subscribe();
 
