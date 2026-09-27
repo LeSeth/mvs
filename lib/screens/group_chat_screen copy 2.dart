@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -46,7 +47,6 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
   late final String _myHash = SupabaseService.hashPhoneNumber(widget.myPhone);
 
-  // Avatar des membres.
   final Map<String, String?> _avatarsByHash = {};
   final Map<String, String?> _avatarsByPseudo = {};
 
@@ -244,35 +244,36 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     );
   }
 
-  Future<void> _sendAudioMessage(
-    Uint8List bytes,
-    int durationMs,
-    String extension,
-    String mimeType,
-  ) async {
-    final audioUrl = await SupabaseService.uploadVoiceMessage(
-      senderPhone: widget.myPhone,
-      bytes: bytes,
-      extension: extension,
-      mimeType: mimeType,
-    );
+  Future<void> _sendAudioMessage(File file, int durationMs) async {
+    try {
+      final bytes = await file.readAsBytes();
 
-    if (audioUrl == null) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Échec de l'envoi du message vocal.")),
-        );
+      final audioUrl = await SupabaseService.uploadVoiceMessage(
+        senderPhone: widget.myPhone,
+        bytes: bytes,
+      );
+
+      if (audioUrl == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("Échec de l'envoi du message vocal.")),
+          );
+        }
+        return;
       }
-      return;
-    }
 
-    await GroupService.sendGroupAudioMessage(
-      groupId: widget.groupId,
-      senderPhone: widget.myPhone,
-      senderPseudo: widget.myPseudo,
-      audioUrl: audioUrl,
-      audioDurationMs: durationMs,
-    );
+      await GroupService.sendGroupAudioMessage(
+        groupId: widget.groupId,
+        senderPhone: widget.myPhone,
+        senderPseudo: widget.myPseudo,
+        audioUrl: audioUrl,
+        audioDurationMs: durationMs,
+      );
+    } finally {
+      if (await file.exists()) {
+        await file.delete();
+      }
+    }
   }
 
   Future<void> _sendImageMessage(Uint8List bytes, String extension) async {

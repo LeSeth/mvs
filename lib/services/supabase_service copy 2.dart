@@ -253,19 +253,20 @@ class SupabaseService {
   static Future<String?> uploadVoiceMessage({
     required String senderPhone,
     required Uint8List bytes,
-    String extension = 'm4a',
-    String mimeType = 'audio/mp4',
   }) async {
     try {
       final path =
-          '$senderPhone/voice_${DateTime.now().millisecondsSinceEpoch}.$extension';
+          '$senderPhone/voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
 
       await _client.storage
           .from(_voiceBucket)
           .uploadBinary(
             path,
             bytes,
-            fileOptions: FileOptions(contentType: mimeType, upsert: false),
+            fileOptions: const FileOptions(
+              contentType: 'audio/mp4',
+              upsert: false,
+            ),
           );
 
       return _client.storage.from(_voiceBucket).getPublicUrl(path);

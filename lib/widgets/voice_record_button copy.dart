@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:typed_data';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 
@@ -10,17 +10,10 @@ import '../services/audio_recorder_service.dart';
 //
 // Comportement : un tap démarre l'enregistrement (après demande de
 // permission micro), un second tap arrête l'enregistrement et déclenche
-// [onRecorded] avec les octets audio prêts à uploader (le format diffère
-// selon la plateforme, voir AudioRecorderService). Pendant l'enregistrement,
-// un chronomètre s'affiche ainsi qu'un bouton d'annulation (corbeille).
+// [onRecorded]. Pendant l'enregistrement, un chronomètre s'affiche ainsi
+// qu'un bouton d'annulation (corbeille).
 class VoiceRecordButton extends StatefulWidget {
-  final void Function(
-    Uint8List bytes,
-    int durationMs,
-    String extension,
-    String mimeType,
-  )
-  onRecorded;
+  final void Function(File file, int durationMs) onRecorded;
 
   const VoiceRecordButton({super.key, required this.onRecorded});
 
@@ -77,12 +70,7 @@ class _VoiceRecordButtonState extends State<VoiceRecordButton> {
     if (mounted) setState(() => _isRecording = false);
 
     if (result != null) {
-      widget.onRecorded(
-        result.bytes,
-        result.durationMs,
-        result.extension,
-        result.mimeType,
-      );
+      widget.onRecorded(result.file, result.durationMs);
     } else if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Enregistrement trop court.')),

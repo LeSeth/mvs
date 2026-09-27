@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -226,44 +225,43 @@ class _ChatScreenState extends State<ChatScreen> {
     await _loadMessages();
   }
 
-  Future<void> _sendAudioMessage(File file, int durationMs) async {
-    try {
-      final bytes = await file.readAsBytes();
+  Future<void> _sendAudioMessage(
+    Uint8List bytes,
+    int durationMs,
+    String extension,
+    String mimeType,
+  ) async {
+    final audioUrl = await SupabaseService.uploadVoiceMessage(
+      senderPhone: widget.senderPhone,
+      bytes: bytes,
+      extension: extension,
+      mimeType: mimeType,
+    );
 
-      final audioUrl = await SupabaseService.uploadVoiceMessage(
-        senderPhone: widget.senderPhone,
-        bytes: bytes,
-      );
-
-      if (audioUrl == null) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("Échec de l'envoi du message vocal.")),
-          );
-        }
-        return;
+    if (audioUrl == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Échec de l'envoi du message vocal.")),
+        );
       }
-
-      await ContactService.ensureMutualContact(
-        phoneA: widget.senderPhone,
-        pseudoA: widget.senderPseudo,
-        phoneB: widget.receiverPhone,
-        pseudoB: widget.receiverPseudo,
-      );
-
-      await MessageService.sendAudioMessage(
-        senderPhone: widget.senderPhone,
-        receiverPhone: widget.receiverPhone,
-        audioUrl: audioUrl,
-        audioDurationMs: durationMs,
-      );
-
-      await _loadMessages();
-    } finally {
-      if (await file.exists()) {
-        await file.delete();
-      }
+      return;
     }
+
+    await ContactService.ensureMutualContact(
+      phoneA: widget.senderPhone,
+      pseudoA: widget.senderPseudo,
+      phoneB: widget.receiverPhone,
+      pseudoB: widget.receiverPseudo,
+    );
+
+    await MessageService.sendAudioMessage(
+      senderPhone: widget.senderPhone,
+      receiverPhone: widget.receiverPhone,
+      audioUrl: audioUrl,
+      audioDurationMs: durationMs,
+    );
+
+    await _loadMessages();
   }
 
   Future<void> _sendImageMessage(Uint8List bytes, String extension) async {
