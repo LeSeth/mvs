@@ -42,8 +42,29 @@ class _ChatScreenState extends State<ChatScreen> {
   RealtimeChannel? _conversationChannel;
 
   static const Duration _disappearDelay = Duration(seconds: 20);
+  static const Duration _retryDelay = Duration(seconds: 5);
 
-  final Map<dynamic, Timer> _messageTimers = {};
+  // ---------------------------------------------------------------------
+  // Disparition des messages reçus : file FIFO STRICTE.
+  // Un seul minuteur tourne à la fois : celui du plus ancien message reçu
+  // encore affiché. Le message suivant ne démarre son compte à rebours
+  // que lorsque le précédent a réellement disparu (supprimé côté serveur
+  // ou déjà absent). Ainsi un nouveau message ne peut jamais partir avant
+  // un ancien.
+  // ---------------------------------------------------------------------
+  final List<dynamic> _expiryQueue = [];
+  Timer? _expiryTimer;
+  dynamic _activeExpiryId;
+  bool _expiryBusy = false;
+
+  // Ids déjà disparus pendant cette session : un rechargement (dont le
+  // résultat peut être périmé) ne doit JAMAIS les faire réapparaître.
+  final Set<dynamic> _removedIds = {};
+
+  // Messages arrivés en temps réel pendant qu'un rechargement est en cours
+  // (ils peuvent manquer dans le résultat du rechargement).
+  int _loadsInFlight = 0;
+  final Set<dynamic> _arrivedDuringLoad = {};
 
   String? _receiverAvatarUrl;
 
@@ -94,23 +115,44 @@ class _ChatScreenState extends State<ChatScreen> {
 
         if (!mounted) return;
 
+        final id = message['id'];
+
+        // Déjà disparu ou déjà affiché (ex. déjà inclus par un rechargement).
+        if (_removedIds.contains(id)) return;
+        if (_messages.any((m) => m['id'] == id)) return;
+
+        if (_loadsInFlight > 0) {
+          _arrivedDuringLoad.add(id);
+        }
+
         setState(() {
           _messages.add(message);
         });
 
         _scrollToBottom();
-        _scheduleMessageDeletion(message);
+        _enqueueForExpiry(message);
       },
       onMessagesDeleted: (ids) {
         if (!mounted) return;
+
+        for (final id in ids) {
+          _removedIds.add(id);
+          _expiryQueue.remove(id);
+
+          // Le message dont le minuteur tournait a été supprimé ailleurs :
+          // on arrête ce minuteur pour passer au suivant.
+          if (id == _activeExpiryId && !_expiryBusy) {
+            _expiryTimer?.cancel();
+            _expiryTimer = null;
+            _activeExpiryId = null;
+          }
+        }
 
         setState(() {
           _messages.removeWhere((m) => ids.contains(m['id']));
         });
 
-        for (final id in ids) {
-          _messageTimers.remove(id)?.cancel();
-        }
+        _startNextExpiry();
       },
     );
   }
@@ -132,11 +174,9 @@ class _ChatScreenState extends State<ChatScreen> {
     _messageController.dispose();
     _scrollController.dispose();
 
-    for (final timer in _messageTimers.values) {
-      timer.cancel();
-    }
-
-    _messageTimers.clear();
+    _expiryTimer?.cancel();
+    _expiryTimer = null;
+    _expiryQueue.clear();
 
     if (_conversationChannel != null) {
       MessageService.unsubscribe(_conversationChannel!);
@@ -146,57 +186,139 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _loadMessages() async {
-    final messages = await MessageService.getConversation(
+    _loadsInFlight++;
+
+    final loaded = await MessageService.getConversation(
       userPhone1: widget.senderPhone,
       userPhone2: widget.receiverPhone,
     );
 
-    if (mounted) {
-      setState(() {
-        _messages = messages;
-        _isLoading = false;
-      });
+    _loadsInFlight--;
 
-      _scrollToBottom();
+    if (!mounted) {
+      if (_loadsInFlight == 0) _arrivedDuringLoad.clear();
+      return;
     }
 
-    for (final message in _messages) {
-      _scheduleMessageDeletion(message);
+    // Fusion sûre : on écarte tout ce qui a déjà disparu (résultat périmé)
+    // et on conserve les messages arrivés en direct pendant le chargement.
+    final merged = <Map<String, dynamic>>[];
+    final seen = <dynamic>{};
+
+    for (final m in loaded) {
+      final id = m['id'];
+      if (_removedIds.contains(id)) continue;
+      if (seen.add(id)) merged.add(m);
+    }
+
+    for (final m in _messages) {
+      final id = m['id'];
+      if (_removedIds.contains(id) || seen.contains(id)) continue;
+      if (_arrivedDuringLoad.contains(id)) {
+        seen.add(id);
+        merged.add(m);
+      }
+    }
+
+    if (_loadsInFlight == 0) _arrivedDuringLoad.clear();
+
+    setState(() {
+      _messages = merged;
+      _isLoading = false;
+    });
+
+    _scrollToBottom();
+
+    for (final message in merged) {
+      _enqueueForExpiry(message);
     }
   }
 
-  void _scheduleMessageDeletion(Map<String, dynamic> message) {
+  // Ajoute un message reçu à la fin de la file (jamais deux fois).
+  void _enqueueForExpiry(Map<String, dynamic> message) {
     if (message['sender_phone'] != widget.receiverPhone) {
       return;
     }
 
     final id = message['id'];
 
-    if (_messageTimers.containsKey(id)) {
+    if (id == null || _removedIds.contains(id) || _expiryQueue.contains(id)) {
       return;
     }
 
-    _messageTimers[id] = Timer(_disappearDelay, () => _deleteSingleMessage(id));
+    _expiryQueue.add(id);
+    _startNextExpiry();
   }
 
-  Future<void> _deleteSingleMessage(dynamic id) async {
-    _messageTimers.remove(id);
+  // Démarre le compte à rebours du message en tête de file, seulement si
+  // aucun autre n'est en cours.
+  void _startNextExpiry() {
+    if (!mounted) return;
+    if (_expiryTimer != null || _expiryBusy || _expiryQueue.isEmpty) return;
 
-    final deleted = await MessageService.deleteMessageById(id);
+    final id = _expiryQueue.first;
+    _activeExpiryId = id;
+    _expiryTimer = Timer(_disappearDelay, () => _expireHead(id));
+  }
 
-    if (!deleted) return;
+  // Le message en tête de file arrive à échéance.
+  Future<void> _expireHead(dynamic id) async {
+    _expiryTimer = null;
+    _expiryBusy = true;
 
-    if (mounted) {
-      setState(() {
-        _messages.removeWhere((m) => m['id'] == id);
-      });
+    bool deletedByMe = false;
+    bool gone = false;
+
+    try {
+      deletedByMe = await MessageService.deleteMessageById(id);
+      gone = deletedByMe || await _isGoneFromServer(id);
+    } catch (e) {
+      debugPrint('Erreur disparition du message: $e');
+      gone = false;
     }
 
-    if (_conversationChannel != null) {
+    _expiryBusy = false;
+
+    if (!mounted) return;
+
+    if (!gone) {
+      // Suppression impossible pour l'instant (réseau…) : on réessaie sur
+      // le MÊME message, sans jamais laisser passer les suivants.
+      _expiryTimer = Timer(_retryDelay, () => _expireHead(id));
+      return;
+    }
+
+    _expiryQueue.remove(id);
+    _removedIds.add(id);
+    _activeExpiryId = null;
+
+    setState(() {
+      _messages.removeWhere((m) => m['id'] == id);
+    });
+
+    if (deletedByMe && _conversationChannel != null) {
       await MessageService.broadcastMessagesDeleted(
         channel: _conversationChannel!,
         ids: [id],
       );
+    }
+
+    // Seulement maintenant, le message suivant commence son compte à rebours.
+    _startNextExpiry();
+  }
+
+  // Vrai si le message n'existe plus en base (déjà supprimé par ailleurs).
+  Future<bool> _isGoneFromServer(dynamic id) async {
+    try {
+      final row = await SupabaseService.client
+          .from('messages')
+          .select('id')
+          .eq('id', id)
+          .maybeSingle();
+
+      return row == null;
+    } catch (_) {
+      return false;
     }
   }
 

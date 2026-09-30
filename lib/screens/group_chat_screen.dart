@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../services/group_service.dart';
@@ -33,11 +34,17 @@ class GroupChatScreen extends StatefulWidget {
 class _GroupChatScreenState extends State<GroupChatScreen> {
   final _messageController = TextEditingController();
   final _scrollController = ScrollController();
+  final _renameController = TextEditingController();
 
   List<Map<String, dynamic>> _messages = [];
   List<Map<String, dynamic>> _members = [];
 
   bool _isLoading = true;
+  bool _isCreator = false;
+
+  String _groupName = '';
+  String? _groupAvatarUrl;
+  String? _creatorPhone;
 
   RealtimeChannel? _channel;
 
@@ -46,16 +53,24 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
   late final String _myHash = SupabaseService.hashPhoneNumber(widget.myPhone);
 
-  // Avatar des membres.
   final Map<String, String?> _avatarsByHash = {};
   final Map<String, String?> _avatarsByPseudo = {};
 
   bool _hasText = false;
 
+  // Feuille "Infos du groupe"
+  // _infoRevision est incrémenté à chaque changement d'état du groupe
+  // (nom, photo, membres) pour rafraîchir la feuille si elle est ouverte.
+  final ValueNotifier<int> _infoRevision = ValueNotifier<int>(0);
+  bool _infoOpen = false;
+  bool _infoBusy = false;
+  bool _leaving = false;
+
   @override
   void initState() {
     super.initState();
 
+    _loadGroupInfo();
     _loadMembers();
     _loadMessages();
     _loadAvatars();
@@ -63,9 +78,32 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
     _messageController.addListener(() {
       final hasText = _messageController.text.trim().isNotEmpty;
+
       if (hasText != _hasText) {
         setState(() => _hasText = hasText);
       }
+    });
+  }
+
+  // setState + rafraîchissement de la feuille d'infos.
+  void _setInfo(VoidCallback fn) {
+    if (!mounted) return;
+
+    setState(fn);
+
+    _infoRevision.value++;
+  }
+
+  Future<void> _loadGroupInfo() async {
+    final group = await GroupService.getGroup(widget.groupId);
+
+    if (!mounted || group == null) return;
+
+    _setInfo(() {
+      _groupName = group['name']?.toString() ?? widget.groupName;
+      _groupAvatarUrl = group['avatar_url']?.toString();
+      _creatorPhone = group['created_by']?.toString();
+      _isCreator = _creatorPhone == widget.myPhone;
     });
   }
 
@@ -73,7 +111,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     final members = await GroupService.getGroupMembers(widget.groupId);
 
     if (mounted) {
-      setState(() {
+      _setInfo(() {
         _members = members;
       });
     }
@@ -104,7 +142,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         }
       }
 
-      setState(() {
+      _setInfo(() {
         _avatarsByHash
           ..clear()
           ..addAll(byHash);
@@ -162,7 +200,55 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
           _messageTimers.remove(id)?.cancel();
         }
       },
+      onGroupUpdated: (name, avatarUrl) {
+        if (!mounted) return;
+
+        _setInfo(() {
+          if (name != null && name.isNotEmpty) {
+            _groupName = name;
+          }
+
+          if (avatarUrl != null) {
+            _groupAvatarUrl = avatarUrl;
+          }
+        });
+      },
+      onGroupDeleted: () {
+        if (!mounted) return;
+
+        _leaveGroup('Ce groupe a été supprimé par son créateur.');
+      },
+      onMemberRemoved: (memberPhone) {
+        if (!mounted) return;
+
+        if (memberPhone == widget.myPhone) {
+          _leaveGroup('Vous avez été retiré du groupe.');
+        } else {
+          _loadMembers();
+        }
+      },
     );
+  }
+
+  // Sortie forcée de l'écran (groupe supprimé ou retrait du membre).
+  // Ferme d'abord la feuille d'infos et ses dialogues s'ils sont ouverts :
+  // la fermeture du chat est alors faite par _openGroupInfo.
+  void _leaveGroup(String message) {
+    if (_leaving) return;
+
+    _leaving = true;
+
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+
+    if (_infoOpen) {
+      final chatRoute = ModalRoute.of(context);
+
+      Navigator.of(context).popUntil((route) => route == chatRoute);
+    } else {
+      Navigator.of(context).pop();
+    }
   }
 
   void _scheduleMessageRead(Map<String, dynamic> message) {
@@ -215,6 +301,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   void dispose() {
     _messageController.dispose();
     _scrollController.dispose();
+    _renameController.dispose();
+    _infoRevision.dispose();
 
     for (final timer in _messageTimers.values) {
       timer.cancel();
@@ -229,8 +317,514 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     super.dispose();
   }
 
+  // =========================
+  // INFOS DU GROUPE
+  // =========================
+
+  Future<void> _openGroupInfo() async {
+    if (_infoOpen) return;
+
+    _infoOpen = true;
+
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.85,
+        minChildSize: 0.5,
+        maxChildSize: 0.95,
+        builder: (_, scrollController) => _buildInfoSheet(scrollController),
+      ),
+    );
+
+    _infoOpen = false;
+
+    if (_leaving && mounted) {
+      Navigator.of(context).pop();
+    }
+  }
+
+  Future<void> _runInfoAction(Future<void> Function() action) async {
+    if (_infoBusy) return;
+
+    _infoBusy = true;
+    _infoRevision.value++;
+
+    try {
+      await action();
+    } finally {
+      _infoBusy = false;
+
+      if (mounted) _infoRevision.value++;
+    }
+  }
+
+  void _snack(String text) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+  }
+
+  Future<void> _changeGroupPhoto() async {
+    if (!_isCreator || _infoBusy) return;
+
+    final picker = ImagePicker();
+
+    final image = await picker.pickImage(
+      source: ImageSource.gallery,
+      imageQuality: 85,
+      maxWidth: 1200,
+    );
+
+    if (image == null) return;
+
+    await _runInfoAction(() async {
+      final bytes = await image.readAsBytes();
+
+      final extension = image.path.split('.').last.toLowerCase();
+
+      final safeExtension = extension == 'png' ? 'png' : 'jpg';
+
+      final avatarUrl = await SupabaseService.uploadGroupAvatar(
+        senderPhone: widget.myPhone,
+        groupId: widget.groupId,
+        bytes: bytes,
+        extension: safeExtension,
+      );
+
+      if (avatarUrl == null) {
+        _snack("Échec de l'envoi de la photo.");
+
+        return;
+      }
+
+      final success = await GroupService.updateGroupAvatar(
+        groupId: widget.groupId,
+        requesterPhone: widget.myPhone,
+        avatarUrl: avatarUrl,
+        channel: _channel,
+      );
+
+      if (success) {
+        _setInfo(() {
+          _groupAvatarUrl = avatarUrl;
+        });
+      } else {
+        _snack('Impossible de modifier la photo du groupe.');
+      }
+    });
+  }
+
+  Future<void> _renameGroup() async {
+    if (!_isCreator || _infoBusy) return;
+
+    _renameController.text = _groupName.isEmpty ? widget.groupName : _groupName;
+
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (ctx) {
+        void submit() {
+          final value = _renameController.text.trim();
+
+          if (value.isEmpty) return;
+
+          Navigator.pop(ctx, value);
+        }
+
+        return AlertDialog(
+          backgroundColor: const Color(0xFF1F2C34),
+          title: const Text(
+            'Modifier le nom du groupe',
+            style: TextStyle(color: Colors.white),
+          ),
+          content: TextField(
+            controller: _renameController,
+            autofocus: true,
+            maxLength: 40,
+            style: const TextStyle(color: Colors.white),
+            decoration: InputDecoration(
+              hintText: 'Nom du groupe',
+              hintStyle: TextStyle(color: Colors.grey[500]),
+              counterStyle: const TextStyle(color: Colors.grey),
+            ),
+            onSubmitted: (_) => submit(),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Annuler'),
+            ),
+            TextButton(onPressed: submit, child: const Text('Enregistrer')),
+          ],
+        );
+      },
+    );
+
+    if (newName == null || newName == _groupName || !mounted) return;
+
+    await _runInfoAction(() async {
+      final success = await GroupService.updateGroupName(
+        groupId: widget.groupId,
+        requesterPhone: widget.myPhone,
+        newName: newName,
+        channel: _channel,
+      );
+
+      if (success) {
+        _setInfo(() {
+          _groupName = newName;
+        });
+      } else {
+        _snack('Impossible de modifier le nom du groupe.');
+      }
+    });
+  }
+
+  Future<void> _confirmRemoveMember(String memberPhone, String pseudo) async {
+    if (!_isCreator || _infoBusy) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1F2C34),
+        title: const Text(
+          'Retirer ce membre ?',
+          style: TextStyle(color: Colors.white),
+        ),
+        content: Text(
+          '$pseudo sera retiré du groupe.',
+          style: const TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Annuler'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Retirer', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    await _runInfoAction(() async {
+      final success = await GroupService.removeMember(
+        groupId: widget.groupId,
+        requesterPhone: widget.myPhone,
+        memberPhone: memberPhone,
+        channel: _channel,
+      );
+
+      if (success) {
+        await _loadMembers();
+      } else {
+        _snack('Impossible de retirer ce membre.');
+      }
+    });
+  }
+
+  Future<void> _confirmDeleteGroup() async {
+    if (!_isCreator || _infoBusy) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1F2C34),
+        title: const Text(
+          'Supprimer le groupe ?',
+          style: TextStyle(color: Colors.white),
+        ),
+        content: const Text(
+          'Le groupe, ses membres et tous ses messages seront supprimés '
+          'définitivement pour tout le monde.',
+          style: TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Annuler'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Supprimer', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    await _runInfoAction(() async {
+      final success = await GroupService.deleteGroup(
+        groupId: widget.groupId,
+        requesterPhone: widget.myPhone,
+        channel: _channel,
+      );
+
+      if (success) {
+        // Ferme la feuille ; _openGroupInfo ferme ensuite le chat.
+        _leaving = true;
+
+        if (mounted) Navigator.of(context).pop();
+      } else {
+        _snack('Impossible de supprimer le groupe.');
+      }
+    });
+  }
+
+  Widget _buildInfoSheet(ScrollController scrollController) {
+    return Container(
+      decoration: const BoxDecoration(
+        color: Color(0xFF0E1621),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: ValueListenableBuilder<int>(
+        valueListenable: _infoRevision,
+        builder: (context, _, __) {
+          final members = [..._members]
+            ..sort((a, b) {
+              final aCreator = a['member_phone'] == _creatorPhone ? 0 : 1;
+              final bCreator = b['member_phone'] == _creatorPhone ? 0 : 1;
+
+              return aCreator.compareTo(bCreator);
+            });
+
+          final hasAvatar =
+              _groupAvatarUrl != null && _groupAvatarUrl!.isNotEmpty;
+
+          final displayName = _groupName.isEmpty
+              ? widget.groupName
+              : _groupName;
+
+          return Stack(
+            children: [
+              ListView(
+                controller: scrollController,
+                padding: const EdgeInsets.only(bottom: 24),
+                children: [
+                  Center(
+                    child: Container(
+                      margin: const EdgeInsets.only(top: 10, bottom: 8),
+                      width: 40,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: Colors.white24,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                    child: Column(
+                      children: [
+                        GestureDetector(
+                          onTap: _isCreator && !_infoBusy
+                              ? _changeGroupPhoto
+                              : null,
+                          child: Stack(
+                            children: [
+                              CircleAvatar(
+                                radius: 55,
+                                backgroundColor: Colors.white,
+                                backgroundImage: hasAvatar
+                                    ? NetworkImage(_groupAvatarUrl!)
+                                    : null,
+                                child: hasAvatar
+                                    ? null
+                                    : const Icon(
+                                        Icons.group,
+                                        size: 55,
+                                        color: Color(0xFF2AABEE),
+                                      ),
+                              ),
+                              if (_isCreator)
+                                Positioned(
+                                  right: 0,
+                                  bottom: 0,
+                                  child: Container(
+                                    padding: const EdgeInsets.all(8),
+                                    decoration: const BoxDecoration(
+                                      color: Color(0xFF2AABEE),
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: const Icon(
+                                      Icons.camera_alt,
+                                      size: 18,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                        if (_isCreator)
+                          TextButton.icon(
+                            onPressed: _infoBusy ? null : _changeGroupPhoto,
+                            icon: const Icon(
+                              Icons.image_outlined,
+                              color: Color(0xFF2AABEE),
+                            ),
+                            label: const Text(
+                              'Changer la photo',
+                              style: TextStyle(color: Color(0xFF2AABEE)),
+                            ),
+                          ),
+                        const SizedBox(height: 8),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Flexible(
+                              child: Text(
+                                displayName,
+                                textAlign: TextAlign.center,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                            if (_isCreator)
+                              IconButton(
+                                tooltip: 'Modifier le nom',
+                                icon: const Icon(
+                                  Icons.edit,
+                                  color: Color(0xFF2AABEE),
+                                  size: 20,
+                                ),
+                                onPressed: _infoBusy ? null : _renameGroup,
+                              ),
+                          ],
+                        ),
+                        Text(
+                          'Groupe · ${members.length} membre'
+                          '${members.length > 1 ? "s" : ""}',
+                          style: const TextStyle(
+                            color: Colors.grey,
+                            fontSize: 14,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Divider(color: Colors.white12, height: 1),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+                    child: Text(
+                      '👥 ${members.length} membre'
+                      '${members.length > 1 ? "s" : ""}',
+                      style: const TextStyle(
+                        color: Color(0xFF2AABEE),
+                        fontWeight: FontWeight.bold,
+                        fontSize: 14,
+                      ),
+                    ),
+                  ),
+                  ...members.map(_buildInfoMemberTile),
+                  if (_isCreator) ...[
+                    const SizedBox(height: 16),
+                    const Divider(color: Colors.white12, height: 1),
+                    ListTile(
+                      leading: const Icon(
+                        Icons.delete_outline,
+                        color: Colors.red,
+                      ),
+                      title: const Text(
+                        'Supprimer le groupe',
+                        style: TextStyle(color: Colors.red),
+                      ),
+                      onTap: _infoBusy ? null : _confirmDeleteGroup,
+                    ),
+                  ],
+                ],
+              ),
+              if (_infoBusy)
+                const Positioned(
+                  left: 0,
+                  right: 0,
+                  top: 0,
+                  child: LinearProgressIndicator(
+                    minHeight: 2,
+                    color: Color(0xFF2AABEE),
+                    backgroundColor: Colors.transparent,
+                  ),
+                ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildInfoMemberTile(Map<String, dynamic> m) {
+    final phone = m['member_phone']?.toString() ?? '';
+    final pseudo = m['member_pseudo']?.toString() ?? '';
+
+    final isMe = phone == widget.myPhone;
+    final isGroupCreator = phone == _creatorPhone;
+
+    final canRemove = _isCreator && !isMe && !isGroupCreator;
+
+    return ListTile(
+      leading: _buildSmallAvatar(
+        avatarUrl: _avatarsByPseudo[pseudo],
+        pseudo: pseudo,
+      ),
+      title: Row(
+        children: [
+          Flexible(
+            child: Text(
+              pseudo,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Colors.white),
+            ),
+          ),
+          if (isMe) const Text(' (Vous)', style: TextStyle(color: Colors.grey)),
+        ],
+      ),
+      subtitle: isGroupCreator
+          ? const Text(
+              'Créateur du groupe',
+              style: TextStyle(color: Color(0xFF2AABEE), fontSize: 12),
+            )
+          : null,
+      trailing: canRemove
+          ? IconButton(
+              tooltip: 'Retirer du groupe',
+              icon: const Icon(Icons.person_remove_outlined, color: Colors.red),
+              onPressed: _infoBusy
+                  ? null
+                  : () => _confirmRemoveMember(phone, pseudo),
+            )
+          : null,
+    );
+  }
+
+  Widget _buildGroupAvatar() {
+    return CircleAvatar(
+      radius: 21,
+      backgroundColor: Colors.white,
+      backgroundImage: _groupAvatarUrl != null && _groupAvatarUrl!.isNotEmpty
+          ? NetworkImage(_groupAvatarUrl!)
+          : null,
+      child: _groupAvatarUrl == null || _groupAvatarUrl!.isEmpty
+          ? const Icon(Icons.group, color: Color(0xFF2AABEE))
+          : null,
+    );
+  }
+
   void _sendMessage() async {
-    if (_messageController.text.trim().isEmpty) return;
+    if (_messageController.text.trim().isEmpty) {
+      return;
+    }
 
     final content = _messageController.text.trim();
 
@@ -263,6 +857,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
           const SnackBar(content: Text("Échec de l'envoi du message vocal.")),
         );
       }
+
       return;
     }
 
@@ -288,6 +883,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
           const SnackBar(content: Text("Échec de l'envoi de l'image.")),
         );
       }
+
       return;
     }
 
@@ -316,6 +912,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
           const SnackBar(content: Text("Échec de l'envoi du fichier.")),
         );
       }
+
       return;
     }
 
@@ -333,18 +930,35 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              widget.groupName,
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
-            Text(
-              '${_members.length} membre${_members.length > 1 ? "s" : ""}',
-              style: const TextStyle(fontSize: 12, color: Colors.grey),
-            ),
-          ],
+        title: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: _openGroupInfo,
+          child: Row(
+            children: [
+              _buildGroupAvatar(),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _groupName.isEmpty ? widget.groupName : _groupName,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    Text(
+                      '${_members.length} membre'
+                      '${_members.length > 1 ? "s" : ""}',
+                      style: const TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
@@ -353,7 +967,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.info_outline),
-            onPressed: _showMembersSheet,
+            onPressed: _openGroupInfo,
           ),
         ],
       ),
@@ -543,50 +1157,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     );
   }
 
-  void _showMembersSheet() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: const Color(0xFF1F2C34),
-      builder: (context) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text(
-                '${_members.length} membre${_members.length > 1 ? "s" : ""}',
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 16,
-                ),
-              ),
-            ),
-            ..._members.map((m) {
-              final pseudo = (m['member_pseudo'] as String?) ?? '';
-
-              final avatarUrl = _avatarsByPseudo[pseudo];
-
-              return ListTile(
-                leading: _buildSmallAvatar(
-                  avatarUrl: avatarUrl,
-                  pseudo: pseudo,
-                ),
-                title: Text(
-                  pseudo,
-                  style: const TextStyle(color: Colors.white),
-                ),
-              );
-            }),
-            const SizedBox(height: 12),
-          ],
-        ),
-      ),
-    );
-  }
-
   String _formatTime(String dateTime) {
     final dt = DateTime.parse(dateTime);
+
     final now = DateTime.now();
 
     if (dt.day == now.day && dt.month == now.month && dt.year == now.year) {

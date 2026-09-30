@@ -128,7 +128,7 @@ class SupabaseService {
 
       final users = await _client
           .from('users')
-          .select('id, pseudo, phone_number, phone_hash, is_online')
+          .select('id, pseudo, phone_number, phone_hash, is_online, avatar_url')
           .ilike('pseudo', '%${query.trim()}%')
           .limit(20);
 
@@ -175,7 +175,7 @@ class SupabaseService {
   }
 
   // =========================
-  // AVATAR
+  // AVATAR UTILISATEUR
   // =========================
 
   static Future<String?> getAvatarUrl(String userId) async {
@@ -241,10 +241,45 @@ class SupabaseService {
   }
 
   // =========================
+  // AVATAR DE GROUPE
+  // =========================
+
+  static Future<String?> uploadGroupAvatar({
+    required String senderPhone,
+    required String groupId,
+    required Uint8List bytes,
+    required String extension,
+  }) async {
+    try {
+      final ext = extension.toLowerCase() == 'png' ? 'png' : 'jpg';
+
+      final path =
+          '$senderPhone/groups/$groupId/avatar_${DateTime.now().millisecondsSinceEpoch}.$ext';
+
+      await _client.storage
+          .from(_attachmentsBucket)
+          .uploadBinary(
+            path,
+            bytes,
+            fileOptions: FileOptions(
+              contentType: ext == 'png' ? 'image/png' : 'image/jpeg',
+              upsert: false,
+            ),
+          );
+
+      return _client.storage.from(_attachmentsBucket).getPublicUrl(path);
+    } catch (e) {
+      print('Erreur upload avatar groupe: $e');
+      return null;
+    }
+  }
+
+  // =========================
   // MESSAGES VOCAUX
   // =========================
-  // Bucket Supabase Storage dédié "voice_messages" (public, comme
-  // "avatars"). Un fichier par message, rangé sous le numéro de
+
+  // Bucket Supabase Storage dédié "voice_messages".
+  // Un fichier par message, rangé sous le numéro de
   // l'expéditeur pour rester cohérent avec le reste du projet.
 
   static const String _voiceBucket = 'voice_messages';
@@ -278,6 +313,7 @@ class SupabaseService {
   // =========================
   // IMAGES ET FICHIERS
   // =========================
+
   // Même bucket "chat_attachments" pour les deux, rangés sous le numéro de
   // l'expéditeur puis un sous-dossier "images/" ou "files/", pour n'avoir
   // qu'un seul bucket Storage à créer côté Supabase.
@@ -289,6 +325,7 @@ class SupabaseService {
   }) async {
     try {
       final ext = extension.toLowerCase();
+
       final path =
           '$senderPhone/images/img_${DateTime.now().millisecondsSinceEpoch}.$ext';
 
@@ -317,6 +354,7 @@ class SupabaseService {
   }) async {
     try {
       final safeName = fileName.replaceAll(RegExp(r'[^\w.\-]'), '_');
+
       final path =
           '$senderPhone/files/${DateTime.now().millisecondsSinceEpoch}_$safeName';
 
@@ -336,19 +374,18 @@ class SupabaseService {
   }
 
   // Best effort : supprime un fichier du storage quand le message
-  // éphémère correspondant disparaît de la base (lu, ou groupe/membre
-  // supprimé). N'importe quelle erreur ici (fichier déjà absent, réseau...)
-  // est ignorée : le message en base est déjà supprimé, c'est ce qui
-  // compte pour le caractère éphémère.
+  // éphémère correspondant disparaît de la base.
   static Future<void> _deleteFromBucket(String bucket, String? url) async {
     if (url == null || url.isEmpty) return;
 
     try {
       final marker = '/$bucket/';
       final index = url.indexOf(marker);
+
       if (index == -1) return;
 
       final path = url.substring(index + marker.length);
+
       await _client.storage.from(bucket).remove([path]);
     } catch (e) {
       print('Erreur suppression fichier storage ($bucket): $e');

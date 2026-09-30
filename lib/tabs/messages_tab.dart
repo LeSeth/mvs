@@ -129,6 +129,15 @@ class MessagesTabState extends State<MessagesTab> {
   Future<void> _loadContacts() async {
     final contacts = await ContactService.getConversations(widget.phoneNumber);
 
+    // Photos de profil des contacts : une seule requête pour toute la liste.
+    final avatarsByHash = await _fetchAvatarsByHash(
+      contacts
+          .map((c) => c['contact_phone_hash']?.toString() ?? '')
+          .where((h) => h.isNotEmpty)
+          .toSet()
+          .toList(),
+    );
+
     List<Map<String, dynamic>> contactsWithMessages = [];
     for (var contact in contacts) {
       // Trouver le vrai numéro via le hash
@@ -152,6 +161,8 @@ class MessagesTabState extends State<MessagesTab> {
       contactsWithMessages.add({
         ...contact,
         'contact_phone': contactPhone,
+        'contact_avatar_url':
+            avatarsByHash[contact['contact_phone_hash']?.toString()],
         'last_message': lastMessage,
         'unread_count': unreadCount,
       });
@@ -197,6 +208,50 @@ class MessagesTabState extends State<MessagesTab> {
       (sum, c) => sum + (c['unread_count'] as int? ?? 0),
     );
     widget.onUnreadCountChanged?.call(totalUnread);
+  }
+
+  Future<Map<String, String?>> _fetchAvatarsByHash(List<String> hashes) async {
+    if (hashes.isEmpty) return {};
+
+    try {
+      final users = await SupabaseService.client
+          .from('users')
+          .select('phone_hash, avatar_url')
+          .inFilter('phone_hash', hashes);
+
+      final Map<String, String?> byHash = {};
+
+      for (final user in users) {
+        final hash = user['phone_hash']?.toString();
+
+        if (hash != null && hash.isNotEmpty) {
+          byHash[hash] = user['avatar_url']?.toString();
+        }
+      }
+
+      return byHash;
+    } catch (e) {
+      debugPrint('Erreur récupération avatars conversations: $e');
+      return {};
+    }
+  }
+
+  // Avatar d'une ligne de conversation : photo si disponible, sinon repli
+  // (initiale du contact ou icône de groupe).
+  Widget _buildConversationAvatar({
+    required String? avatarUrl,
+    required Color backgroundColor,
+    required Widget fallback,
+    double radius = 28,
+  }) {
+    final hasUrl = avatarUrl != null && avatarUrl.isNotEmpty;
+
+    return CircleAvatar(
+      radius: radius,
+      backgroundColor: backgroundColor,
+      backgroundImage: hasUrl ? NetworkImage(avatarUrl) : null,
+      child: hasUrl ? null : fallback,
+    );
   }
 
   void _onSearchChanged() {
@@ -310,10 +365,11 @@ class MessagesTabState extends State<MessagesTab> {
         final isOnline = user['is_online'] == true;
 
         return ListTile(
-          leading: CircleAvatar(
-            radius: 24,
+          leading: _buildConversationAvatar(
+            avatarUrl: user['avatar_url']?.toString(),
             backgroundColor: const Color(0xFF2AABEE),
-            child: Text(
+            radius: 24,
+            fallback: Text(
               pseudo.isNotEmpty ? pseudo[0].toUpperCase() : '?',
               style: const TextStyle(
                 color: Colors.white,
@@ -417,10 +473,10 @@ class MessagesTabState extends State<MessagesTab> {
       margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
       elevation: 0,
       child: ListTile(
-        leading: const CircleAvatar(
-          radius: 28,
-          backgroundColor: Color(0xFF6C63FF),
-          child: Icon(Icons.group, color: Colors.white),
+        leading: _buildConversationAvatar(
+          avatarUrl: group['avatar_url']?.toString(),
+          backgroundColor: const Color(0xFF6C63FF),
+          fallback: const Icon(Icons.group, color: Colors.white),
         ),
         title: Text(
           group['name'] ?? '',
@@ -466,10 +522,10 @@ class MessagesTabState extends State<MessagesTab> {
       margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
       elevation: 0,
       child: ListTile(
-        leading: CircleAvatar(
-          radius: 28,
+        leading: _buildConversationAvatar(
+          avatarUrl: contact['contact_avatar_url']?.toString(),
           backgroundColor: const Color(0xFF2AABEE),
-          child: Text(
+          fallback: Text(
             (contact['contact_pseudo'] as String?)?.isNotEmpty == true
                 ? contact['contact_pseudo'][0].toUpperCase()
                 : '?',

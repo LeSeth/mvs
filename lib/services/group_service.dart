@@ -64,6 +64,7 @@ class GroupService {
           .eq('member_phone', userPhone);
 
       final groupIds = memberships.map((m) => m['group_id']).toList();
+
       if (groupIds.isEmpty) return [];
 
       final groups = await _client
@@ -111,6 +112,7 @@ class GroupService {
           .from('group_message_reads')
           .select('message_id')
           .eq('member_phone', memberPhone);
+
       final readIds = reads.map((r) => r['message_id']).toSet();
 
       return List<Map<String, dynamic>>.from(
@@ -131,6 +133,7 @@ class GroupService {
           .from('group_message_reads')
           .select('message_id')
           .eq('member_phone', memberPhone);
+
       final readIds = reads.map((r) => r['message_id']).toSet();
 
       final messages = await _client
@@ -187,8 +190,6 @@ class GroupService {
     }
   }
 
-  // Message vocal de groupe : [audioUrl] pointe vers le fichier déjà
-  // uploadé dans le bucket Storage "voice_messages".
   static Future<void> sendGroupAudioMessage({
     required String groupId,
     required String senderPhone,
@@ -207,8 +208,6 @@ class GroupService {
     );
   }
 
-  // Image de groupe : [imageUrl] pointe vers le fichier déjà uploadé dans
-  // le bucket Storage "chat_attachments".
   static Future<void> sendGroupImageMessage({
     required String groupId,
     required String senderPhone,
@@ -225,8 +224,6 @@ class GroupService {
     );
   }
 
-  // Fichier de groupe : [fileUrl] pointe vers le fichier déjà uploadé dans
-  // le bucket Storage "chat_attachments".
   static Future<void> sendGroupFileMessage({
     required String groupId,
     required String senderPhone,
@@ -268,7 +265,7 @@ class GroupService {
           .eq('id', messageId)
           .maybeSingle();
 
-      if (message == null) return true; // déjà supprimé entre-temps
+      if (message == null) return true;
 
       final senderPhoneHash = message['sender_phone'];
       final audioUrl = message['audio_url'] as String?;
@@ -276,6 +273,7 @@ class GroupService {
       final fileUrl = message['file_url'] as String?;
 
       final members = await getGroupMembers(groupId);
+
       final requiredReaders = members
           .map((m) => m['member_phone'] as String)
           .where(
@@ -288,6 +286,7 @@ class GroupService {
           .from('group_message_reads')
           .select('member_phone')
           .eq('message_id', messageId);
+
       final readBy = reads.map((r) => r['member_phone'] as String).toSet();
 
       final allRead =
@@ -298,7 +297,9 @@ class GroupService {
         await _client.from('group_messages').delete().eq('id', messageId);
 
         unawaited(SupabaseService.deleteVoiceMessage(audioUrl));
+
         unawaited(SupabaseService.deleteChatAttachment(imageUrl));
+
         unawaited(SupabaseService.deleteChatAttachment(fileUrl));
 
         if (channel != null) {
@@ -309,6 +310,7 @@ class GroupService {
             },
           );
         }
+
         return true;
       }
 
@@ -326,6 +328,7 @@ class GroupService {
           .select()
           .eq('id', groupId)
           .maybeSingle();
+
       return group;
     } catch (e) {
       print('Erreur récupération groupe: $e');
@@ -341,9 +344,11 @@ class GroupService {
   }) async {
     try {
       final name = newName.trim();
+
       if (name.isEmpty) return false;
 
       final group = await getGroup(groupId);
+
       if (group == null || group['created_by'] != requesterPhone) {
         return false;
       }
@@ -356,9 +361,53 @@ class GroupService {
           payload: {'name': name},
         );
       }
+
       return true;
     } catch (e) {
       print('Erreur modification nom groupe: $e');
+      return false;
+    }
+  }
+
+  // NOUVEAU : modifier la photo du groupe
+  static Future<bool> updateGroupAvatar({
+    required String groupId,
+    required String requesterPhone,
+    required String avatarUrl,
+    RealtimeChannel? channel,
+  }) async {
+    try {
+      final group = await getGroup(groupId);
+
+      if (group == null || group['created_by'] != requesterPhone) {
+        return false;
+      }
+
+      final oldAvatarUrl = group['avatar_url'] as String?;
+
+      await _client
+          .from('groups')
+          .update({'avatar_url': avatarUrl})
+          .eq('id', groupId);
+
+      // Best effort : supprime l'ancienne photo du storage pour ne pas
+      // laisser de fichiers orphelins à chaque changement.
+      if (oldAvatarUrl != null &&
+          oldAvatarUrl.isNotEmpty &&
+          oldAvatarUrl != avatarUrl) {
+        unawaited(SupabaseService.deleteChatAttachment(oldAvatarUrl));
+      }
+
+      if (channel != null) {
+        await channel.sendBroadcastMessage(
+          event: 'group_updated',
+          payload: {'avatar_url': avatarUrl},
+        );
+      }
+
+      return true;
+    } catch (e) {
+      print('Erreur modification photo groupe: $e');
       return false;
     }
   }
@@ -370,14 +419,18 @@ class GroupService {
   }) async {
     try {
       final group = await getGroup(groupId);
+
       if (group == null || group['created_by'] != requesterPhone) {
         return false;
       }
+
+      final groupAvatarUrl = group['avatar_url'] as String?;
 
       final messages = await _client
           .from('group_messages')
           .select('id, audio_url, image_url, file_url')
           .eq('group_id', groupId);
+
       final messageIds = messages.map((m) => m['id']).toList();
 
       final attachmentUrls = <(String bucket, String? url)>[
@@ -393,6 +446,7 @@ class GroupService {
             .from('group_message_reads')
             .delete()
             .inFilter('message_id', messageIds);
+
         await _client.from('group_messages').delete().eq('group_id', groupId);
       }
 
@@ -405,7 +459,11 @@ class GroupService {
       }
 
       await _client.from('group_members').delete().eq('group_id', groupId);
+
       await _client.from('groups').delete().eq('id', groupId);
+
+      // Photo du groupe : supprimée du storage une fois le groupe effacé.
+      unawaited(SupabaseService.deleteChatAttachment(groupAvatarUrl));
 
       if (channel != null) {
         await channel.sendBroadcastMessage(
@@ -413,6 +471,7 @@ class GroupService {
           payload: {'group_id': groupId},
         );
       }
+
       return true;
     } catch (e) {
       print('Erreur suppression groupe: $e');
@@ -427,9 +486,12 @@ class GroupService {
     RealtimeChannel? channel,
   }) async {
     try {
-      if (requesterPhone == memberPhone) return false;
+      if (requesterPhone == memberPhone) {
+        return false;
+      }
 
       final group = await getGroup(groupId);
+
       if (group == null || group['created_by'] != requesterPhone) {
         return false;
       }
@@ -440,12 +502,14 @@ class GroupService {
           .eq('group_id', groupId)
           .eq('member_phone', memberPhone)
           .maybeSingle();
+
       if (member == null) return false;
 
       final messages = await _client
           .from('group_messages')
           .select('id')
           .eq('group_id', groupId);
+
       final messageIds = messages.map((m) => m['id']).toList();
 
       if (messageIds.isNotEmpty) {
@@ -468,6 +532,7 @@ class GroupService {
           payload: {'member_phone': memberPhone},
         );
       }
+
       return true;
     } catch (e) {
       print('Erreur suppression membre: $e');
@@ -479,7 +544,7 @@ class GroupService {
     required String groupId,
     required void Function(Map<String, dynamic> message) onInsert,
     required void Function(List<dynamic> deletedIds) onMessagesDeleted,
-    void Function(String name)? onGroupUpdated,
+    void Function(String? name, String? avatarUrl)? onGroupUpdated,
     void Function()? onGroupDeleted,
     void Function(String memberPhone)? onMemberRemoved,
   }) {
@@ -497,10 +562,26 @@ class GroupService {
           ),
           callback: (payload) => onInsert(payload.newRecord),
         )
+        // Filet de sécurité côté base : le broadcast n'est émis qu'une fois
+        // par le dernier lecteur et peut être raté par l'expéditeur.
+        // Les filtres ne sont pas supportés sur DELETE : pas de filtre
+        // serveur, le retrait local se fait par id (sans effet si l'id
+        // n'appartient pas à ce groupe).
+        .onPostgresChanges(
+          event: PostgresChangeEvent.delete,
+          schema: 'public',
+          table: 'group_messages',
+          callback: (payload) {
+            final id = payload.oldRecord['id'];
+
+            if (id != null) onMessagesDeleted([id]);
+          },
+        )
         .onBroadcast(
           event: 'group_messages_deleted',
           callback: (payload) {
             final ids = payload['ids'] as List<dynamic>? ?? [];
+
             onMessagesDeleted(ids);
           },
         )
@@ -508,7 +589,10 @@ class GroupService {
           event: 'group_updated',
           callback: (payload) {
             final name = payload['name']?.toString();
-            if (name != null && name.isNotEmpty) onGroupUpdated?.call(name);
+
+            final avatarUrl = payload['avatar_url']?.toString();
+
+            onGroupUpdated?.call(name, avatarUrl);
           },
         )
         .onBroadcast(
@@ -519,6 +603,7 @@ class GroupService {
           event: 'group_member_removed',
           callback: (payload) {
             final phone = payload['member_phone']?.toString();
+
             if (phone != null && phone.isNotEmpty) {
               onMemberRemoved?.call(phone);
             }
@@ -533,15 +618,14 @@ class GroupService {
     required String channelName,
     required void Function(Map<String, dynamic> message) onInsert,
   }) {
-    final channel = _client
-        .channel(channelName)
-        .onPostgresChanges(
-          event: PostgresChangeEvent.insert,
-          schema: 'public',
-          table: 'group_messages',
-          callback: (payload) => onInsert(payload.newRecord),
-        )
-        .subscribe();
+    final channel = _client.channel(channelName)
+      ..onPostgresChanges(
+        event: PostgresChangeEvent.insert,
+        schema: 'public',
+        table: 'group_messages',
+        callback: (payload) => onInsert(payload.newRecord),
+      )
+      ..subscribe();
 
     return channel;
   }
@@ -551,20 +635,19 @@ class GroupService {
     required void Function() onNewMembership,
     required String channelName,
   }) {
-    final channel = _client
-        .channel(channelName)
-        .onPostgresChanges(
-          event: PostgresChangeEvent.insert,
-          schema: 'public',
-          table: 'group_members',
-          filter: PostgresChangeFilter(
-            type: PostgresChangeFilterType.eq,
-            column: 'member_phone',
-            value: myPhone,
-          ),
-          callback: (payload) => onNewMembership(),
-        )
-        .subscribe();
+    final channel = _client.channel(channelName)
+      ..onPostgresChanges(
+        event: PostgresChangeEvent.insert,
+        schema: 'public',
+        table: 'group_members',
+        filter: PostgresChangeFilter(
+          type: PostgresChangeFilterType.eq,
+          column: 'member_phone',
+          value: myPhone,
+        ),
+        callback: (payload) => onNewMembership(),
+      )
+      ..subscribe();
 
     return channel;
   }
