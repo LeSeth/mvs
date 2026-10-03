@@ -1,13 +1,20 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../tabs/messages_tab.dart';
 import '../tabs/videos_tab.dart';
 import '../tabs/statuts_tab.dart';
 import '../tabs/parametres_tab.dart';
+import '../widgets/animated_chat_background.dart';
 import 'login_screen.dart';
 import 'new_conversation_screen.dart';
 import 'create_group_screen.dart';
 import '../services/supabase_service.dart';
 import '../services/auth_storage.dart';
+
+const Color _kBlue = Color(0xFF2AABEE);
+const Color _kViolet = Color(0xFF8E5CF7);
+const Color _kPink = Color(0xFFFF4D8D);
+const Color _kBg = Color(0xFF0E1621);
 
 class HomeScreen extends StatefulWidget {
   final String phoneNumber;
@@ -26,26 +33,50 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen>
-    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   late TabController _tabController;
+  late final AnimationController _ringCtrl;
   final GlobalKey<MessagesTabState> _messagesTabKey =
       GlobalKey<MessagesTabState>();
   int _totalUnread = 0;
+  int _lastTabIndex = 0;
+
+  // Photo de profil de l'utilisateur (affichée dans la barre du haut).
+  String? _avatarUrl;
+
+  String get _avatarCacheKey => 'my_avatar_${widget.userId}';
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 4, vsync: this);
     _tabController.addListener(() {
+      // Quand on quitte l'onglet Paramètres, la photo a pu changer :
+      // on la recharge pour que la page d'accueil soit toujours à jour.
+      final index = _tabController.index;
+      if (index != _lastTabIndex) {
+        if (_lastTabIndex == 3) _loadMyAvatar();
+        _lastTabIndex = index;
+      }
+
       // Le FAB "nouvelle conversation" ne doit apparaître que sur l'onglet Messages
       setState(() {});
     });
+
+    // Anneau de couleur qui tourne autour de la photo.
+    _ringCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 6),
+    )..repeat();
+
     WidgetsBinding.instance.addObserver(this);
+    _loadMyAvatar();
   }
 
   @override
   void dispose() {
     _tabController.dispose();
+    _ringCtrl.dispose();
     WidgetsBinding.instance.removeObserver(this);
     SupabaseService.setOnlineStatus(widget.phoneNumber, false);
     super.dispose();
@@ -57,37 +88,161 @@ class _HomeScreenState extends State<HomeScreen>
       SupabaseService.setOnlineStatus(widget.phoneNumber, false);
     } else if (state == AppLifecycleState.resumed) {
       SupabaseService.setOnlineStatus(widget.phoneNumber, true);
+      _loadMyAvatar();
     }
+  }
+
+  // Affiche d'abord la dernière photo connue (enregistrée sur le téléphone),
+  // puis la met à jour depuis le serveur. Une coupure de connexion ne fait
+  // jamais disparaître la photo.
+  Future<void> _loadMyAvatar() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final cached = prefs.getString(_avatarCacheKey);
+
+      if (cached != null && mounted && cached != (_avatarUrl ?? '')) {
+        setState(() => _avatarUrl = cached.isEmpty ? null : cached);
+      }
+    } catch (_) {}
+
+    try {
+      final row = await SupabaseService.client
+          .from('users')
+          .select('avatar_url')
+          .eq('id', widget.userId)
+          .maybeSingle()
+          .timeout(const Duration(seconds: 15));
+
+      if (row == null) return;
+
+      final url = row['avatar_url']?.toString() ?? '';
+
+      if (mounted && url != (_avatarUrl ?? '')) {
+        setState(() => _avatarUrl = url.isEmpty ? null : url);
+      }
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_avatarCacheKey, url);
+    } catch (e) {
+      // Pas de connexion : on garde la photo déjà affichée.
+      debugPrint('Photo de profil : réseau indisponible ($e)');
+    }
+  }
+
+  // Photo de l'utilisateur dans un anneau animé ; la première lettre du
+  // pseudo ne sert plus que de repli (pas de photo, chargement, hors ligne).
+  Widget _buildMyAvatar() {
+    final initial = widget.pseudo.isNotEmpty
+        ? widget.pseudo[0].toUpperCase()
+        : '?';
+
+    final letter = Container(
+      width: 34,
+      height: 34,
+      alignment: Alignment.center,
+      decoration: const BoxDecoration(
+        shape: BoxShape.circle,
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [_kBlue, _kViolet],
+        ),
+      ),
+      child: Text(
+        initial,
+        style: const TextStyle(
+          color: Colors.white,
+          fontWeight: FontWeight.bold,
+          fontSize: 16,
+        ),
+      ),
+    );
+
+    final hasPhoto = _avatarUrl != null && _avatarUrl!.isNotEmpty;
+
+    return GestureDetector(
+      onTap: () => _tabController.animateTo(3), // ouvre Paramètres
+      child: SizedBox(
+        width: 42,
+        height: 42,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            // Anneau dégradé qui tourne
+            RotationTransition(
+              turns: _ringCtrl,
+              child: Container(
+                width: 42,
+                height: 42,
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: SweepGradient(
+                    colors: [_kBlue, _kViolet, _kPink, _kBlue],
+                  ),
+                ),
+              ),
+            ),
+            // Liseré sombre entre l'anneau et la photo
+            Container(
+              width: 38,
+              height: 38,
+              decoration: const BoxDecoration(
+                shape: BoxShape.circle,
+                color: _kBg,
+              ),
+            ),
+            // Photo de profil
+            ClipOval(
+              child: SizedBox(
+                width: 34,
+                height: 34,
+                child: hasPhoto
+                    ? Image.network(
+                        _avatarUrl!,
+                        key: ValueKey<String>(_avatarUrl!),
+                        width: 34,
+                        height: 34,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, _, _) => letter,
+                        loadingBuilder: (context, child, progress) =>
+                            progress == null ? child : letter,
+                      )
+                    : letter,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
+        backgroundColor: _kBg,
+        elevation: 0,
+        scrolledUnderElevation: 0,
         leading: Padding(
           padding: const EdgeInsets.only(left: 12),
-          child: GestureDetector(
-            onTap: () => _tabController.animateTo(3), // ouvre Paramètres
-            child: CircleAvatar(
-              radius: 18,
-              backgroundColor: const Color(0xFF2AABEE),
-              child: Text(
-                widget.pseudo.isNotEmpty ? widget.pseudo[0].toUpperCase() : '?',
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ),
-          ),
+          child: Center(child: _buildMyAvatar()),
         ),
-        leadingWidth: 56,
+        leadingWidth: 58,
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              'V BF',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+            ShaderMask(
+              shaderCallback: (rect) => const LinearGradient(
+                colors: [Colors.white, Color(0xFFBFE6FF)],
+              ).createShader(rect),
+              child: const Text(
+                'V BF',
+                style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w800,
+                  color: Colors.white,
+                ),
+              ),
             ),
             Text(
               widget.pseudo,
@@ -103,41 +258,86 @@ class _HomeScreenState extends State<HomeScreen>
             },
           ),
         ],
-      ),
-      body: TabBarView(
-        controller: _tabController,
-        children: [
-          MessagesTab(
-            key: _messagesTabKey,
-            phoneNumber: widget.phoneNumber,
-            pseudo: widget.pseudo,
-            userId: widget.userId,
-            onUnreadCountChanged: (count) {
-              if (mounted) setState(() => _totalUnread = count);
-            },
+        // Fine ligne lumineuse sous la barre
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(1),
+          child: Container(
+            height: 1,
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [
+                  _kBlue.withValues(alpha: 0),
+                  _kBlue.withValues(alpha: 0.6),
+                  _kViolet.withValues(alpha: 0.6),
+                  _kPink.withValues(alpha: 0.6),
+                  _kPink.withValues(alpha: 0),
+                ],
+              ),
+            ),
           ),
-          const VideosTab(),
-          const StatutsTab(),
-          ParametresTab(pseudo: widget.pseudo, userId: widget.userId),
+        ),
+      ),
+      body: Stack(
+        children: [
+          // Arrière-plan animé, derrière tous les onglets
+          const Positioned.fill(child: AnimatedChatBackground()),
+          TabBarView(
+            controller: _tabController,
+            children: [
+              MessagesTab(
+                key: _messagesTabKey,
+                phoneNumber: widget.phoneNumber,
+                pseudo: widget.pseudo,
+                userId: widget.userId,
+                onUnreadCountChanged: (count) {
+                  if (mounted) setState(() => _totalUnread = count);
+                },
+              ),
+              const VideosTab(),
+              const StatutsTab(),
+              ParametresTab(pseudo: widget.pseudo, userId: widget.userId),
+            ],
+          ),
         ],
       ),
       floatingActionButton: _tabController.index == 0
-          ? FloatingActionButton(
-              backgroundColor: const Color(0xFF2AABEE),
-              child: const Icon(Icons.chat, color: Colors.white),
-              onPressed: () async {
-                await Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => NewConversationScreen(
-                      phoneNumber: widget.phoneNumber,
-                      pseudo: widget.pseudo,
-                    ),
+          ? Container(
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: const LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [_kBlue, _kViolet],
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: _kViolet.withValues(alpha: 0.45),
+                    blurRadius: 18,
+                    offset: const Offset(0, 8),
                   ),
-                );
-                // Rafraîchit la liste des conversations au retour
-                _messagesTabKey.currentState?.refreshContacts();
-              },
+                ],
+              ),
+              child: FloatingActionButton(
+                backgroundColor: Colors.transparent,
+                elevation: 0,
+                focusElevation: 0,
+                hoverElevation: 0,
+                highlightElevation: 0,
+                child: const Icon(Icons.chat, color: Colors.white),
+                onPressed: () async {
+                  await Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => NewConversationScreen(
+                        phoneNumber: widget.phoneNumber,
+                        pseudo: widget.pseudo,
+                      ),
+                    ),
+                  );
+                  // Rafraîchit la liste des conversations au retour
+                  _messagesTabKey.currentState?.refreshContacts();
+                },
+              ),
             )
           : null,
       bottomNavigationBar: _buildBottomNavBar(),
@@ -176,9 +376,10 @@ class _HomeScreenState extends State<HomeScreen>
         decoration: BoxDecoration(
           color: const Color(0xFF1F2C34),
           borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(0.25),
+              color: Colors.black.withValues(alpha: 0.25),
               blurRadius: 12,
               offset: const Offset(0, 4),
             ),
@@ -192,67 +393,86 @@ class _HomeScreenState extends State<HomeScreen>
               children: List.generate(items.length, (index) {
                 final item = items[index];
                 final isSelected = _tabController.index == index;
-                final color = isSelected
-                    ? const Color(0xFF2AABEE)
-                    : Colors.grey;
+                final color = isSelected ? _kBlue : Colors.grey;
 
                 return Expanded(
                   child: InkWell(
                     borderRadius: BorderRadius.circular(20),
                     onTap: () => _tabController.animateTo(index),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Stack(
-                          clipBehavior: Clip.none,
-                          children: [
-                            Icon(
-                              isSelected ? item.activeIcon : item.icon,
-                              color: color,
-                              size: 24,
-                            ),
-                            if (index == 0 && _totalUnread > 0)
-                              Positioned(
-                                right: -8,
-                                top: -4,
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 5,
-                                    vertical: 1,
-                                  ),
-                                  constraints: const BoxConstraints(
-                                    minWidth: 16,
-                                    minHeight: 16,
-                                  ),
-                                  decoration: const BoxDecoration(
-                                    color: Color(0xFF2AABEE),
-                                    shape: BoxShape.circle,
-                                  ),
-                                  child: Text(
-                                    _totalUnread > 99 ? '99+' : '$_totalUnread',
-                                    textAlign: TextAlign.center,
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.bold,
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 250),
+                      curve: Curves.easeOut,
+                      margin: const EdgeInsets.symmetric(
+                        horizontal: 4,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(16),
+                        gradient: isSelected
+                            ? LinearGradient(
+                                colors: [
+                                  _kBlue.withValues(alpha: 0.18),
+                                  _kViolet.withValues(alpha: 0.18),
+                                ],
+                              )
+                            : null,
+                      ),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Stack(
+                            clipBehavior: Clip.none,
+                            children: [
+                              Icon(
+                                isSelected ? item.activeIcon : item.icon,
+                                color: color,
+                                size: 24,
+                              ),
+                              if (index == 0 && _totalUnread > 0)
+                                Positioned(
+                                  right: -8,
+                                  top: -4,
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 5,
+                                      vertical: 1,
+                                    ),
+                                    constraints: const BoxConstraints(
+                                      minWidth: 16,
+                                      minHeight: 16,
+                                    ),
+                                    decoration: const BoxDecoration(
+                                      color: _kPink,
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: Text(
+                                      _totalUnread > 99
+                                          ? '99+'
+                                          : '$_totalUnread',
+                                      textAlign: TextAlign.center,
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.bold,
+                                      ),
                                     ),
                                   ),
                                 ),
-                              ),
-                          ],
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          item.label,
-                          style: TextStyle(
-                            color: color,
-                            fontSize: 11,
-                            fontWeight: isSelected
-                                ? FontWeight.bold
-                                : FontWeight.normal,
+                            ],
                           ),
-                        ),
-                      ],
+                          const SizedBox(height: 3),
+                          Text(
+                            item.label,
+                            style: TextStyle(
+                              color: color,
+                              fontSize: 11,
+                              fontWeight: isSelected
+                                  ? FontWeight.bold
+                                  : FontWeight.normal,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 );
@@ -356,7 +576,7 @@ class _HomeScreenState extends State<HomeScreen>
         backgroundColor: const Color(0xFF1F2C34),
         title: const Row(
           children: [
-            Icon(Icons.message_rounded, color: Color(0xFF2AABEE), size: 30),
+            Icon(Icons.message_rounded, color: _kBlue, size: 30),
             SizedBox(width: 10),
             Text('V BF', style: TextStyle(color: Colors.white)),
           ],
@@ -384,10 +604,7 @@ class _HomeScreenState extends State<HomeScreen>
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text(
-              'Fermer',
-              style: TextStyle(color: Color(0xFF2AABEE)),
-            ),
+            child: const Text('Fermer', style: TextStyle(color: _kBlue)),
           ),
         ],
       ),

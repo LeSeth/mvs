@@ -7,6 +7,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../services/group_service.dart';
 import '../services/supabase_service.dart';
+import '../services/expiry_store.dart';
+import '../services/expiry_service.dart';
 import '../widgets/voice_record_button.dart';
 import '../widgets/audio_message_bubble.dart';
 import '../widgets/attachment_picker_button.dart';
@@ -48,8 +50,23 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
   RealtimeChannel? _channel;
 
-  static const Duration _disappearDelay = Duration(seconds: 20);
-  final Map<dynamic, Timer> _messageTimers = {};
+  // ---------------------------------------------------------------------
+  // Disparition des messages reçus : gérée par ExpiryService (global).
+  // Ouvrir la conversation = lire : les messages reçus entrent dans une file
+  // FIFO (20 s chacun) qui continue TOUTE SEULE même si on quitte cet écran
+  // ou si la connexion se coupe. Cet écran ne fait qu'afficher / retirer.
+  // ---------------------------------------------------------------------
+  StreamSubscription<ExpiryEvent>? _expirySub;
+
+  // Ids déjà disparus pendant cette session : un rechargement (dont le
+  // résultat peut être périmé) ne doit JAMAIS les faire réapparaître.
+  final Set<dynamic> _removedIds = {};
+
+  // Messages arrivés en temps réel pendant qu'un rechargement est en cours.
+  int _loadsInFlight = 0;
+  final Set<dynamic> _arrivedDuringLoad = {};
+
+  String get _convKey => ExpiryService.groupKey(widget.myPhone, widget.groupId);
 
   late final String _myHash = SupabaseService.hashPhoneNumber(widget.myPhone);
 
@@ -69,6 +86,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   @override
   void initState() {
     super.initState();
+
+    ExpiryService.instance.start(widget.myPhone);
+    _expirySub = ExpiryService.instance.onExpired.listen(_onExpired);
 
     _loadGroupInfo();
     _loadMembers();
@@ -157,23 +177,91 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   }
 
   Future<void> _loadMessages() async {
-    final messages = await GroupService.getGroupMessages(
+    _loadsInFlight++;
+
+    final loaded = await GroupService.getGroupMessages(
       widget.groupId,
       widget.myPhone,
     );
 
-    if (mounted) {
-      setState(() {
-        _messages = messages;
-        _isLoading = false;
-      });
+    // Messages déjà disparus de l'écran, lecture serveur en attente.
+    final pending = await ExpiryStore.load(_convKey);
 
-      _scrollToBottom();
+    _loadsInFlight--;
+
+    if (!mounted) {
+      if (_loadsInFlight == 0) _arrivedDuringLoad.clear();
+      return;
     }
 
-    for (final message in _messages) {
-      _scheduleMessageRead(message);
+    // Fusion sûre : on écarte tout ce qui a déjà disparu (résultat périmé
+    // ou lecture serveur pas encore confirmée) et on conserve les messages
+    // arrivés en direct pendant le chargement.
+    final merged = <Map<String, dynamic>>[];
+    final seen = <dynamic>{};
+
+    for (final m in loaded) {
+      final id = m['id'];
+      if (_isGone(id, pending)) continue;
+      if (seen.add(id)) merged.add(m);
     }
+
+    for (final m in _messages) {
+      final id = m['id'];
+      if (_isGone(id, pending) || seen.contains(id)) continue;
+      if (_arrivedDuringLoad.contains(id)) {
+        seen.add(id);
+        merged.add(m);
+      }
+    }
+
+    if (_loadsInFlight == 0) _arrivedDuringLoad.clear();
+
+    setState(() {
+      _messages = merged;
+      _isLoading = false;
+    });
+
+    _scrollToBottom();
+
+    // Conversation ouverte = messages lus : le compte à rebours démarre.
+    _enqueueIncoming(merged);
+  }
+
+  // Un message vient d'expirer (file globale) : on le retire de l'écran.
+  void _onExpired(ExpiryEvent event) {
+    if (event.convKey != _convKey || !mounted) return;
+
+    _removedIds.add(event.id);
+
+    setState(() {
+      _messages.removeWhere((m) => m['id'].toString() == event.id.toString());
+    });
+  }
+
+  bool _isGone(dynamic id, Set<String> pending) =>
+      _removedIds.contains(id) ||
+      pending.contains(id.toString()) ||
+      ExpiryService.instance.isExpired(_convKey, id);
+
+  // Messages reçus affichés = ouverts = lus : ils entrent dans la file.
+  // Mes propres messages ne disparaissent pas par minuteur : ils partent
+  // quand tous les autres membres les ont lus.
+  void _enqueueIncoming(List<Map<String, dynamic>> messages) {
+    final ids = messages
+        .where((m) => m['sender_phone'] != _myHash)
+        .map((m) => m['id'])
+        .where((id) => id != null)
+        .toList();
+
+    if (ids.isEmpty) return;
+
+    ExpiryService.instance.enqueue(
+      me: widget.myPhone,
+      isGroup: true,
+      other: widget.groupId,
+      ids: ids,
+    );
   }
 
   void _subscribe() {
@@ -182,23 +270,36 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       onInsert: (message) {
         if (!mounted) return;
 
+        final id = message['id'];
+
+        // Déjà disparu ou déjà affiché (ex. déjà inclus par un rechargement).
+        if (_isGone(id, const <String>{})) return;
+        if (_messages.any((m) => m['id'] == id)) return;
+
+        if (_loadsInFlight > 0) {
+          _arrivedDuringLoad.add(id);
+        }
+
         setState(() {
           _messages.add(message);
         });
 
         _scrollToBottom();
-        _scheduleMessageRead(message);
+        _enqueueIncoming([message]);
       },
       onMessagesDeleted: (ids) {
+        // Supprimé ailleurs : on le sort aussi de la file de disparition.
+        ExpiryService.instance.drop(_convKey, ids);
+
         if (!mounted) return;
+
+        for (final id in ids) {
+          _removedIds.add(id);
+        }
 
         setState(() {
           _messages.removeWhere((m) => ids.contains(m['id']));
         });
-
-        for (final id in ids) {
-          _messageTimers.remove(id)?.cancel();
-        }
       },
       onGroupUpdated: (name, avatarUrl) {
         if (!mounted) return;
@@ -228,6 +329,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         }
       },
     );
+
+    ExpiryService.instance.attachChannel(_convKey, _channel!);
   }
 
   // Sortie forcée de l'écran (groupe supprimé ou retrait du membre).
@@ -251,40 +354,6 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     }
   }
 
-  void _scheduleMessageRead(Map<String, dynamic> message) {
-    if (message['sender_phone'] == _myHash) {
-      return;
-    }
-
-    final id = message['id'];
-
-    if (_messageTimers.containsKey(id)) {
-      return;
-    }
-
-    _messageTimers[id] = Timer(
-      _disappearDelay,
-      () => _markSingleMessageRead(id),
-    );
-  }
-
-  Future<void> _markSingleMessageRead(dynamic id) async {
-    _messageTimers.remove(id);
-
-    if (mounted) {
-      setState(() {
-        _messages.removeWhere((m) => m['id'] == id);
-      });
-    }
-
-    await GroupService.markMessageRead(
-      messageId: id,
-      groupId: widget.groupId,
-      memberPhone: widget.myPhone,
-      channel: _channel,
-    );
-  }
-
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scrollController.hasClients) return;
@@ -304,13 +373,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     _renameController.dispose();
     _infoRevision.dispose();
 
-    for (final timer in _messageTimers.values) {
-      timer.cancel();
-    }
-
-    _messageTimers.clear();
+    // La file de disparition, elle, continue : on se détache seulement.
+    _expirySub?.cancel();
 
     if (_channel != null) {
+      ExpiryService.instance.detachChannel(_convKey, _channel!);
       GroupService.unsubscribe(_channel!);
     }
 
